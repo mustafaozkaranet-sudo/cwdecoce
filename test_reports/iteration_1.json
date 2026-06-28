@@ -1,0 +1,26 @@
+{
+  "summary": "Frontend-only smoke test of SDR-01 Morse Decoder. All required data-testids present, tabs switch, sliders respond to keyboard (when focusing slider thumb), auto-unit toggles, copy-empty toast appears, clear works, WAV file upload accepted, and file playback transitions capture-status-badge from IDLE to LIVE with waveform/FFT rendering.",
+  "tested_scope": ["frontend", "integration"],
+  "passed": [
+    "App loads at root URL with SDR-01 header, FFT Spectrum panel, Waveform panel, controls aside, Decoded Stream section",
+    "All required data-testids present (fft-canvas, wave-canvas, tab-mic, tab-file, mic-start-btn, file-drop-zone, file-input, file-play-btn, pitch-slider, pitch-readout, threshold-slider, threshold-readout, level-bar, wpm-readout, unit-readout, auto-unit-toggle, manual-unit-slider, current-symbol, copy-clipboard-btn, clear-btn, decoded-text-output, signal-status-badge, capture-status-badge)",
+    "Tab switching: MIC tab shows mic-start-btn; FILE tab reveals file-drop-zone, file-input, file-play-btn",
+    "Pitch slider: 700 Hz -> 900 Hz via ArrowRight on slider thumb (role=slider)",
+    "Threshold slider: 140 -> 150 via ArrowRight on slider thumb",
+    "Auto unit toggle: label switches between 'Auto unit: ON' and 'Auto unit: OFF'; manual-unit-slider becomes enabled (aria-disabled=false) when OFF",
+    "Copy button on empty decoded text shows toast 'Loaded morse_test.wav'-style toast containing 'Nothing to copy yet' as expected",
+    "Clear button empties decoded-text-output",
+    "File upload: synthetic 700 Hz WAV loaded; drop zone label shows 'MORSE_TEST.WAV' and success toast 'Loaded morse_test.wav' appears",
+    "File playback: clicking file-play-btn changes capture-status-badge from 'IDLE' to 'LIVE'; FFT and waveform render (700 Hz vertical marker visible, waveform line drawing, current-symbol started decoding ('T' visible in stream))",
+    "No React/JS console errors during load or interaction"
+  ],
+  "failed": [],
+  "notes": [
+    "Radix UI sliders require focusing the inner thumb element ([role=\"slider\"]) rather than the root [data-testid] for keyboard ArrowRight to register. This is expected Radix behavior, not a bug.",
+    "Microphone end-to-end not tested (headless env limitation, as noted in request)."
+  ],
+  "action_items": [],
+  "success_rate": {"backend": "N/A (no backend)", "frontend": "100%"},
+  "retest_needed": false,
+  "full_testing_deferred": true
+}
