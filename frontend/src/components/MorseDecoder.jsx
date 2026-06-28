@@ -99,7 +99,7 @@ export default function MorseDecoder() {
     if (!detectorRef.current) {
       const d = audioCtxRef.current.createAnalyser();
       d.fftSize = 1024;
-      d.smoothingTimeConstant = 0.85;
+      d.smoothingTimeConstant = 0.1;
       detectorRef.current = d;
     }
     if (!filterRef.current) {

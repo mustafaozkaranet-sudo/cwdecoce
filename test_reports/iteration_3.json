@@ -1,0 +1,86 @@
+{
+  "summary": "Iteration 3 retest of detector smoothing fix (0.85 -> 0.1). Confirmed: the smoothing change DID land in the code (verified at MorseDecoder.jsx line 102) and is functionally observable — the post-bandpass level now drops between tones (samples like 255,92,20,0,255 visible during SOS playback) instead of staying clipped at 255 forever. HOWEVER, the acceptance assertions still FAIL: SOS decodes as 'G' / '?' / 'MT' / 'TM' (never contains both 'S' and 'O'), noisy SOS decodes as 'T', PARIS decodes as '6', and off-pitch control now produces 'ETEEE M' (7 chars vs the ≤2 spec). The fix IS an improvement over iteration_2 (which was a single 'T' for everything) but the decode-correctness bug is not resolved.",
+  "tested_scope": ["frontend", "integration", "bug-regression"],
+  "backend_issues": {"critical": [], "minor": []},
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [
+      {
+        "flow": "Bug 1 regression — decode SOS @ 700Hz, unit_ms=80",
+        "issue": "decoded-text-output never contains both 'S' AND 'O'. Tested with autounit ON (thr=140 -> '?', thr=80 -> 'G', thr=50 -> 'G') and with autounit OFF + manual unit=80 (thr=50 -> 'MT', thr=30 -> 'TM'). Acceptance fails.",
+        "affected_selectors": ["[data-testid='decoded-text-output']", "[data-testid='wpm-readout']", "[data-testid='unit-readout']"],
+        "priority": "CRITICAL"
+      },
+      {
+        "flow": "Bug 2 regression — decode noisy SOS",
+        "issue": "decoded-text-output = 'T' at thr=80 and thr=120. No 'S' nor 'O'. Acceptance fails.",
+        "affected_selectors": ["[data-testid='decoded-text-output']"],
+        "priority": "CRITICAL"
+      },
+      {
+        "flow": "PARIS decode",
+        "issue": "decoded-text-output = '6' (`-....`), no 'P' nor 'A'. wpm=4, unit=300 (auto-unit clamped to max). Acceptance fails.",
+        "affected_selectors": ["[data-testid='decoded-text-output']"],
+        "priority": "HIGH"
+      },
+      {
+        "flow": "Off-pitch negative control (target=1000Hz, audio=700Hz)",
+        "issue": "Now produces 'ETEEE M' (7 chars). Spec says ≤2 chars. The smoothing reduction increased spurious-edge sensitivity to bandpass-rejected residue. REGRESSED vs iteration_2 which got only 'U' (1 char).",
+        "affected_selectors": ["[data-testid='decoded-text-output']"],
+        "priority": "HIGH"
+      }
+    ],
+    "design_issues": []
+  },
+  "passed_checks": [
+    "Smoothing constant 0.1 confirmed in code (detector.smoothingTimeConstant = 0.1)",
+    "Detector level now drops below threshold between tones (50ms-resolution capture shows 255,255,92,20,0,255,... within a single SOS playback at thr=50)",
+    "capture-status-badge transitions IDLE -> LIVE on file-play-btn",
+    "fft-canvas renders (53862 non-zero pixels) and wave-canvas renders (18242 non-zero pixels) during playback",
+    "Pitch slider keyboard interaction works (700 -> 1000Hz via ArrowRight on [role=slider])",
+    "Threshold slider keyboard interaction works (140 -> 80 -> 50 -> 30)",
+    "auto-unit-toggle correctly disables auto-unit (verified manual-unit-slider becomes active)",
+    "clear-btn: empties decoded-text-output to ''",
+    "copy-clipboard-btn: button is clickable and triggers handler; toast 'Clipboard unavailable' appears in headless (expected — navigator.clipboard requires user gesture / secure context focus). Functionality is wired correctly; cannot validate clipboard contents in headless Chromium.",
+    "No JS console errors during any playback run"
+  ],
+  "rca_of_the_issue": {
+    "bug_id": "Bug 1 / Bug 2 still incomplete",
+    "symptom": "After smoothing fix to 0.1, SOS still decodes wrong characters (G/?/MT/TM). Off-pitch also regressed from 1 char to 7 chars.",
+    "root_cause": "Two compounding factors. (1) In headless Chromium, file-based audio playback via decodeAudioData -> AudioBufferSourceNode produces a CHOPPY level signal: 50ms-resolution capture of a single SOS playback shows on-states pattern '__TTTTTTTT__TTTTTTTTTTTTTTT___T_TTT_____' — the entire S+O middle section fuses into one long 1.35s ON state because the audio frames inside the second-S dots are scheduled with gaps that the bandpass+detector smooths over. This may be partly a headless-audio artifact. (2) The auto-unit poisoning issue from iteration_2's review #2 is still unaddressed: when the first long ON segment (~1350ms) is finally classified as a dash, sampleUnit = 1350/3 = 450ms which clamps to max(300), pushing the unit to 300ms — at which point all subsequent shorter elements look like dots and the inter-letter gaps look like intra-symbol gaps. This is why PARIS yields '6' (a single long sequence) and SOS yields T/M variants. (3) For off-pitch regression: with smoothing 0.1, the detector now reacts to the much smaller bandpass-rejected residue of the 700Hz tone at the 1000Hz bandpass tap. Q=12 bandpass attenuation of 300Hz offset still leaves enough signal to cross thr=80 occasionally, producing 7 spurious dots/dashes.",
+    "evidence": "Level samples at thr=50, manual unit=80: 0,0,220,255,143,255,255,131,255,92,20,0,255,255,255,255,78,255,255,255,255,84,255,255,255,255,214,72,0,0,255,9,255,78,255,78,0,0,0,... -> decodes 'MT'. Compared to iteration_2: levels stayed clipped at 255 for the entire 2.4s. So smoothing fix DID work, but did not fully solve the decoding.",
+    "fix_recommendation": [
+      "Address auto-unit poisoning: in processEdge, reject the first dotDurations sample if it exceeds 4*current unit, or require N>=2 consistent samples before applying auto-unit. Currently a single 1.3s fused ON immediately clamps unit to 300.",
+      "Consider widening MIN_EDGE_MS slightly (12 -> 20ms) AND/OR requiring a minimum sustained-OFF gap of ~30ms before a flush to avoid the choppy headless audio creating phantom intra-symbol gaps that get reclassified as elements.",
+      "For off-pitch sensitivity: increase Q from 12 to 18-20, OR add a small floor on threshold-effective-level (ignore levels < 30 unconditionally), OR add 'noise floor' tracking that adapts the threshold by some delta above recent OFF-state mean.",
+      "Optional: in renderLoop, use the detector's getByteTimeDomainData to compute a true RMS envelope instead of FFT peak — RMS is less twitchy on transient broadband content and would help Bug 2."
+    ],
+    "reproduction_steps": [
+      "Open the app, click tab-file, select /tmp/sos.wav, click file-play-btn at default thr=140 -> 'S','O' not present in output",
+      "Lower threshold to 50/80 and replay -> still no 'S','O'",
+      "Toggle auto-unit OFF, set manual unit=80 -> still no 'S','O' (MT or TM)",
+      "Set pitch slider to 1000Hz and replay /tmp/sos.wav -> 7 chars decoded instead of ≤2"
+    ]
+  },
+  "test_report_links": ["/tmp/sos.wav", "/tmp/sos_noisy.wav", "/tmp/paris.wav", "/tmp/synth.py"],
+  "action_items": [
+    "Add auto-unit guard: reject the first sample (or any sample > 4*current unit) until two consistent measurements exist. This is the single highest-ROI fix and was already flagged in iteration_2 critical-code-review #2.",
+    "Increase bandpass Q to ~18-20 (or add an absolute level floor of 30) to fix the off-pitch regression introduced by lowering smoothing.",
+    "Consider per-channel level smoothing via a moving average in JS (3-5 samples) instead of the AnalyserNode smoothing — gives more control independent of frequency selectivity.",
+    "Recommend the main agent validate the decoder logic with a synthetic in-memory tone stream (skip AudioContext file playback entirely) since headless Chromium audio scheduling appears unreliable. A dedicated unit test on the edge-classification state machine would catch the auto-unit poisoning bug deterministically."
+  ],
+  "critical_code_review_comments": [
+    "Auto-unit poisoning (line 148-158 of MorseDecoder.jsx) is the dominant remaining bug. A single edge with dur ~= entire file length immediately clamps unit to max 300, breaking all subsequent classification. Fix per iteration_2 recommendation #2 was not applied.",
+    "detectorRef.smoothingTimeConstant=0.1 (line 102) — fix landed, verified at runtime via level captures.",
+    "Off-pitch sensitivity regressed (was 'U' at smoothing 0.85, now 'ETEEE M' at smoothing 0.1) because Q=12 bandpass on its own is not enough rejection — needs either higher Q or a level floor.",
+    "Bandpass Q=12 ringdown plus 0.1 smoothing introduces a ~10-20ms attack latency that shifts apparent dot durations downward — combined with the 12ms MIN_EDGE_MS debounce, very short dots (60ms units) may be lost as the leading-edge transient is absorbed.",
+    "checkTrailingTimeout (line 174) and processEdge race: a sub-2*unit gap during a noisy ON region can cause currentSymbol to never flush. Recommend a hard 'max symbol length' bailout (e.g. if currentSymbol.length > 6 with no flush in N units, force flush)."
+  ],
+  "updated_files": [],
+  "success_rate": {"backend": "N/A (no backend)", "frontend": "55% — UI/visualizers/copy/clear pass; smoothing fix verified at code+runtime level; but the 4 decoder-correctness acceptance criteria (SOS, noisy SOS, PARIS, off-pitch ≤2) all FAIL"},
+  "test_credentials": "none required",
+  "seed_data_creation": "Reused /tmp/sos.wav, /tmp/sos_noisy.wav, /tmp/paris.wav from iteration_2 (still on disk, regenerated by /tmp/synth.py if needed)",
+  "retest_needed": true,
+  "should_main_agent_self_test": false,
+  "context_for_next_testing_agent": "The smoothing fix landed correctly — do NOT undo it. The remaining bug is in (a) auto-unit clamping logic and (b) off-pitch leakage. Next iteration's main agent should fix auto-unit poisoning and raise Q (or add a level floor) to restore off-pitch rejection, then we re-test the same 4 acceptance criteria. Note: file-based audio playback in headless Chromium is unreliable — recommend the main agent add a hidden test harness mode where the decoder consumes a synthetic level array directly (bypassing AudioContext) so the state machine can be tested deterministically."
+}
