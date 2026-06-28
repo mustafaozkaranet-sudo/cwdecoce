@@ -238,7 +238,7 @@ export default function MorseDecoder() {
       // of the user-set threshold, to reject bandpass-rejected leakage from off-pitch tones.
       const st = stateRef.current;
       const HYST = Math.max(4, thr * 0.08);
-      const NOISE_FLOOR = 25;
+      const NOISE_FLOOR = 35;
       const rawOn = level >= NOISE_FLOOR && (st.isOn
         ? level > thr - HYST
         : level > thr + HYST);
