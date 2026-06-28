@@ -1,0 +1,115 @@
+{
+  "theme": "dark",
+  "archetype": "Retro-Futurism / SDR Terminal",
+  "design_philosophy": {
+    "core_concept": "Signal-First, Command-Second. A high-density, precise software-defined radio (SDR) and oscilloscope interface.",
+    "emotional_tone": "Technical, precise, raw, scientific.",
+    "key_principles": [
+      "Data Density over Whitespace: Utilize compact spacing for controls while dedicating maximum real estate to real-time visualizers.",
+      "Terminal Aesthetic: High contrast phosphor green and amber on deep obsidian black.",
+      "Asymmetric Dashboard: Non-standard, instrumentation-style layout instead of generic centered web cards.",
+      "Motion & Feedback: Instant visual feedback on signal thresholds via glowing indicators and pulsing elements."
+    ]
+  },
+  "colors": {
+    "background": {
+      "main": "#050505",
+      "panel": "#0A0A0A",
+      "canvas": "#000000"
+    },
+    "primary": {
+      "phosphor_green": "#00FF66",
+      "dim_green": "#003314",
+      "glow": "rgba(0, 255, 102, 0.4)"
+    },
+    "accent": {
+      "amber_warning": "#FFB000",
+      "amber_dim": "#332300"
+    },
+    "text": {
+      "primary": "#00FF66",
+      "secondary": "#80B399",
+      "muted": "#334D40",
+      "inverse": "#050505"
+    },
+    "border": {
+      "default": "#1A3324",
+      "active": "#00FF66"
+    }
+  },
+  "typography": {
+    "font_families": {
+      "primary_readouts": "JetBrains Mono, monospace",
+      "ui_labels": "IBM Plex Sans, sans-serif"
+    },
+    "scale": {
+      "h1_frequency": "text-5xl sm:text-6xl tracking-tighter font-black",
+      "h2_panel": "text-xl sm:text-2xl tracking-tight font-bold uppercase",
+      "metric_large": "text-3xl sm:text-4xl tracking-widest",
+      "body": "text-sm sm:text-base",
+      "label": "text-xs tracking-[0.2em] uppercase"
+    },
+    "rules": [
+      "Never use Inter or Roboto.",
+      "Readouts, metrics, WPM, and decoded text MUST use JetBrains Mono.",
+      "Labels and secondary text use IBM Plex Sans."
+    ]
+  },
+  "layout": {
+    "grid_system": "The 'Control Room' Grid",
+    "structure": {
+      "container": "grid-cols-1 lg:grid-cols-12 gap-2 p-2 md:p-4 bg-[#050505] min-h-screen",
+      "main_visualizer": "col-span-1 lg:col-span-8 row-span-2 border border-[#1A3324] bg-[#000000] relative overflow-hidden flex flex-col",
+      "side_controls": "col-span-1 lg:col-span-4 border border-[#1A3324] bg-[#0A0A0A] p-4 flex flex-col gap-6",
+      "bottom_decoder": "col-span-1 lg:col-span-12 border border-[#1A3324] bg-[#0A0A0A] p-4 min-h-[150px] flex flex-col",
+      "spacing": "Tight padding (p-4 to p-6 inside panels) to mimic dense hardware controls."
+    }
+  },
+  "surface_strategies": {
+    "panels": "Terminal Look. No rounded corners (rounded-none). 1px solid border in muted green. Background is pure black or very dark gray.",
+    "canvas": "Retro-Futurism. Add a CSS scanline overlay or subtle grain texture over the FFT and Waveform canvases. Canvas drawing should use green strokeStyle with shadowBlur for glow.",
+    "buttons": "Tactile Neo-Brutalist. Flat backgrounds. Hover state inverts colors (e.g., bg-green text-black).",
+    "cards": "Avoid Shadcn Card default styling (no white backgrounds, no rounded corners). Override to use dark flat panels with sharp edges."
+  },
+  "components": {
+    "controls": {
+      "sliders": "Use Shadcn Slider. Customize track to be thin bg-[#1A3324], thumb to be sharp/square bg-[#00FF66]. Use amber for threshold indicator if possible.",
+      "buttons": "Shadcn Button, squared off (rounded-none). Primary action (Start Capture) highly visible with bg-[#00FF66] text-[#050505].",
+      "tabs": "Shadcn Tabs, customized to look like hardware toggle switches or segmented controls. Active tab gets green bottom border."
+    },
+    "indicators": {
+      "tuning_lock": "A small circular or square DOM element that glows bright green (shadow-[0_0_10px_#00FF66]) when signal crosses threshold.",
+      "wpm_display": "Bold JetBrains Mono style readout with amber accent."
+    }
+  },
+  "interactions_and_motion": {
+    "live_data": "Canvas must update via requestAnimationFrame for low latency. Use glowing stroke styles.",
+    "threshold_cross": "When signal crosses the threshold slider value, trigger a UI glow or change an indicator to amber.",
+    "hover_states": "Interactive elements invert or get a 1px bright green border."
+  },
+  "media_and_assets": {
+    "icons": "lucide-react. Use technical icons (Activity, Mic, Upload, Copy, Radio, Settings). No emojis.",
+    "textures": [
+      {
+        "name": "Scanline CSS Overlay",
+        "implementation": "background: linear-gradient(rgba(18, 16, 16, 0) 50%, rgba(0, 0, 0, 0.25) 50%), linear-gradient(90deg, rgba(255, 0, 0, 0.06), rgba(0, 255, 0, 0.02), rgba(0, 0, 255, 0.06)); background-size: 100% 2px, 3px 100%; pointer-events: none; z-index: 10; position: absolute; inset: 0;"
+      }
+    ]
+  },
+  "testing": {
+    "data_testid_rules": "All interactive elements, inputs, buttons, WPM displays, and decoded text areas MUST have a descriptive kebab-case data-testid attribute (e.g., 'mic-start-btn', 'threshold-slider', 'decoded-text-output', 'copy-clipboard-btn', 'tuning-indicator')."
+  },
+  "instructions_to_main_agent": [
+    "Build a single-page React application without routing.",
+    "Use the Web Audio API (AudioContext, AnalyserNode, BiquadFilterNode) to capture mic or file audio.",
+    "Implement two separate canvas elements: one for FFT spectrum and one for time-domain waveform.",
+    "Implement signal processing for morse decoding: detect signal energy at the target pitch (narrow-band filter) crossing the threshold.",
+    "Include adjustable sliders for Target Pitch (Hz) and Threshold.",
+    "Display real-time WPM calculation and the live decoded text.",
+    "Apply the styling rules strictly: sharp edges (rounded-none), phosphor green/amber colors, JetBrains Mono font.",
+    "Add a CSS-based scanline effect absolute positioned over the canvas elements for the oscilloscope feel.",
+    "Ensure the layout mimics a dense SDR dashboard using Tailwind CSS Grid 'Control Room' mode.",
+    "Implement a 'copy to clipboard' button for the decoded morse text.",
+    "Ensure all components use standard HTML/Tailwind or heavily modified Shadcn UI tailored for the dark terminal aesthetic."
+  ]
+}
