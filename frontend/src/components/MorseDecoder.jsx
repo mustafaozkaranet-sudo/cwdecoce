@@ -238,7 +238,7 @@ export default function MorseDecoder() {
       // of the user-set threshold, to reject bandpass-rejected leakage from off-pitch tones.
       const st = stateRef.current;
       const HYST = Math.max(4, thr * 0.08);
-      const NOISE_FLOOR = 35;
+      const NOISE_FLOOR = 25;
       const rawOn = level >= NOISE_FLOOR && (st.isOn
         ? level > thr - HYST
         : level > thr + HYST);
@@ -377,11 +377,6 @@ export default function MorseDecoder() {
       src.connect(filterRef.current);
       micSourceRef.current = src;
       setRunning(true);
-      if (autoUnitRef.current) {
-        setUnitMs(80);
-        unitRef.current = 80;
-        setWpm(0);
-      }
       stateRef.current = {
         isOn: false,
         lastEdgeAt: 0,
@@ -459,11 +454,6 @@ export default function MorseDecoder() {
     filePlayingRef.current = true;
     setFilePlaying(true);
     setRunning(true);
-    if (autoUnitRef.current) {
-      setUnitMs(80);
-      unitRef.current = 80;
-      setWpm(0);
-    }
     stateRef.current = {
       isOn: false,
       lastEdgeAt: 0,
