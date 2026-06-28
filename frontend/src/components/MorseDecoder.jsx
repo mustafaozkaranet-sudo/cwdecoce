@@ -19,7 +19,7 @@ import {
 import { decodeMorseSymbol } from "@/lib/morse";
 
 const FFT_SIZE = 2048;
-const SMOOTHING = 0.6;
+const SMOOTHING = 0.8;
 
 export default function MorseDecoder() {
   const [running, setRunning] = useState(false);
@@ -38,7 +38,9 @@ export default function MorseDecoder() {
 
   // Refs that need not retrigger renders
   const audioCtxRef = useRef(null);
-  const analyserRef = useRef(null);
+  const analyserRef = useRef(null); // raw broadband analyser (for FFT/wave display)
+  const detectorRef = useRef(null); // post-filter analyser (for tone detection)
+  const filterRef = useRef(null); // BiquadFilterNode (bandpass)
   const micStreamRef = useRef(null);
   const micSourceRef = useRef(null);
   const fileSourceRef = useRef(null); // AudioBufferSourceNode
@@ -58,6 +60,9 @@ export default function MorseDecoder() {
     currentSymbol: "",
     dotDurations: [],
     pendingSpace: false,
+    // Debouncer / Schmitt trigger state
+    pendingState: false,
+    pendingSince: 0,
   });
 
   const pitchRef = useRef(pitch);
@@ -65,7 +70,14 @@ export default function MorseDecoder() {
   const unitRef = useRef(unitMs);
   const autoUnitRef = useRef(autoUnit);
 
-  useEffect(() => { pitchRef.current = pitch; }, [pitch]);
+  useEffect(() => {
+    pitchRef.current = pitch;
+    if (filterRef.current && audioCtxRef.current) {
+      try {
+        filterRef.current.frequency.setTargetAtTime(pitch, audioCtxRef.current.currentTime, 0.01);
+      } catch (e) { /* ignore */ }
+    }
+  }, [pitch]);
   useEffect(() => { thresholdRef.current = threshold; }, [threshold]);
   useEffect(() => { unitRef.current = unitMs; }, [unitMs]);
   useEffect(() => { autoUnitRef.current = autoUnit; }, [autoUnit]);
@@ -83,6 +95,22 @@ export default function MorseDecoder() {
       a.fftSize = FFT_SIZE;
       a.smoothingTimeConstant = SMOOTHING;
       analyserRef.current = a;
+    }
+    if (!detectorRef.current) {
+      const d = audioCtxRef.current.createAnalyser();
+      d.fftSize = 1024;
+      d.smoothingTimeConstant = 0.85;
+      detectorRef.current = d;
+    }
+    if (!filterRef.current) {
+      const f = audioCtxRef.current.createBiquadFilter();
+      f.type = "bandpass";
+      f.frequency.value = pitchRef.current;
+      f.Q.value = 12;
+      f.connect(detectorRef.current);
+      filterRef.current = f;
+    } else {
+      filterRef.current.frequency.value = pitchRef.current;
     }
     return audioCtxRef.current;
   }, []);
@@ -117,9 +145,11 @@ export default function MorseDecoder() {
       const isDot = dur < 2 * unit;
       st.currentSymbol += isDot ? "." : "-";
       setCurrentSymbol(st.currentSymbol);
-      if (isDot && autoUnitRef.current) {
-        st.dotDurations.push(dur);
-        if (st.dotDurations.length > 8) st.dotDurations.shift();
+      if (autoUnitRef.current) {
+        // Both dots and dashes contribute (dash ≈ 3 units)
+        const sampleUnit = isDot ? dur : dur / 3;
+        st.dotDurations.push(sampleUnit);
+        if (st.dotDurations.length > 10) st.dotDurations.shift();
         const avg = st.dotDurations.reduce((a, b) => a + b, 0) / st.dotDurations.length;
         const clamped = Math.max(30, Math.min(300, Math.round(avg)));
         setUnitMs(clamped);
@@ -158,12 +188,15 @@ export default function MorseDecoder() {
 
   const renderLoop = useCallback(() => {
     const analyser = analyserRef.current;
+    const detector = detectorRef.current;
     const ctx = audioCtxRef.current;
-    if (!analyser || !ctx) return;
+    if (!analyser || !detector || !ctx) return;
 
     const bufLen = analyser.frequencyBinCount;
     const freqData = new Uint8Array(bufLen);
     const timeData = new Uint8Array(bufLen);
+    const detBufLen = detector.frequencyBinCount;
+    const detFreqData = new Uint8Array(detBufLen);
 
     const fftCanvas = fftCanvasRef.current;
     const waveCanvas = waveCanvasRef.current;
@@ -172,30 +205,49 @@ export default function MorseDecoder() {
       rafRef.current = requestAnimationFrame(draw);
       analyser.getByteFrequencyData(freqData);
       analyser.getByteTimeDomainData(timeData);
+      detector.getByteFrequencyData(detFreqData);
 
       const sampleRate = ctx.sampleRate;
       const targetHz = pitchRef.current;
       const bin = Math.round((targetHz / (sampleRate / 2)) * bufLen);
-      // Average across ~80 Hz band
+      // Visual highlight band on the broadband display (~80 Hz wide)
       const halfWidth = Math.max(2, Math.round((80 / (sampleRate / 2)) * bufLen / 2));
-      let sum = 0;
-      let count = 0;
-      for (let i = Math.max(0, bin - halfWidth); i <= Math.min(bufLen - 1, bin + halfWidth); i++) {
-        sum += freqData[i];
-        count++;
+
+      // Detection level: peak of the bandpass-filtered spectrum near targetHz
+      const detBin = Math.round((targetHz / (sampleRate / 2)) * detBufLen);
+      const detHW = Math.max(1, Math.round((40 / (sampleRate / 2)) * detBufLen));
+      let peak = 0;
+      for (let i = Math.max(0, detBin - detHW); i <= Math.min(detBufLen - 1, detBin + detHW); i++) {
+        if (detFreqData[i] > peak) peak = detFreqData[i];
       }
-      const level = count > 0 ? sum / count : 0;
+      const level = peak;
       setSignalLevel(level);
 
       const thr = thresholdRef.current;
-      const isOn = level > thr;
-      setSignalOn(isOn);
+      // Schmitt-trigger hysteresis: widen the on/off thresholds
+      const st = stateRef.current;
+      const HYST = Math.max(4, thr * 0.08);
+      const rawOn = st.isOn
+        ? level > thr - HYST
+        : level > thr + HYST;
+      setSignalOn(rawOn);
+
       const nowMs = performance.now();
-      if (isOn !== stateRef.current.isOn) {
-        processEdge(isOn, nowMs);
+      // Debounce: only commit a transition after MIN_EDGE_MS of stable opposite state
+      const MIN_EDGE_MS = 12;
+      if (rawOn !== st.isOn) {
+        if (st.pendingState !== rawOn) {
+          st.pendingState = rawOn;
+          st.pendingSince = nowMs;
+        } else if (nowMs - st.pendingSince >= MIN_EDGE_MS) {
+          processEdge(rawOn, nowMs);
+          st.pendingState = rawOn;
+        }
       } else {
+        st.pendingState = rawOn;
         checkTrailingTimeout(nowMs);
       }
+      const isOn = st.isOn;
 
       // Draw FFT
       if (fftCanvas) {
@@ -310,6 +362,7 @@ export default function MorseDecoder() {
       micStreamRef.current = stream;
       const src = audioCtxRef.current.createMediaStreamSource(stream);
       src.connect(analyserRef.current);
+      src.connect(filterRef.current);
       micSourceRef.current = src;
       setRunning(true);
       stateRef.current = {
@@ -317,6 +370,8 @@ export default function MorseDecoder() {
         lastEdgeAt: 0,
         currentSymbol: "",
         dotDurations: [],
+        pendingState: false,
+        pendingSince: 0,
       };
       renderLoop();
       toast.success("Microphone capture started");
@@ -376,6 +431,7 @@ export default function MorseDecoder() {
     const src = audioCtxRef.current.createBufferSource();
     src.buffer = audioBufferRef.current;
     src.connect(analyserRef.current);
+    src.connect(filterRef.current);
     src.connect(audioCtxRef.current.destination);
     src.onended = () => {
       filePlayingRef.current = false;
@@ -391,6 +447,8 @@ export default function MorseDecoder() {
       lastEdgeAt: 0,
       currentSymbol: "",
       dotDurations: [],
+      pendingState: false,
+      pendingSince: 0,
     };
     renderLoop();
   }, [ensureAudioCtx, renderLoop]);
@@ -427,6 +485,8 @@ export default function MorseDecoder() {
       lastEdgeAt: 0,
       currentSymbol: "",
       dotDurations: [],
+      pendingState: false,
+      pendingSince: 0,
     };
   }, []);
 

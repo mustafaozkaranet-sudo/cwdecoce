@@ -1,0 +1,67 @@
+{
+  "summary": "Frontend-only regression test of the two morse decoder bug fixes. Generated synthetic SOS / noisy-SOS / PARIS WAVs at 700Hz and fed them via file input. Bug 1 ('reads E') is NOT fixed — it has merely shifted: now SOS decodes as a single 'T' (one continuous dash) regardless of threshold (tested 50/80/140/180). Bug 2 (broadband-noise triggering) also fails its assertion — noisy SOS decodes to empty string. The new bandpass + separate detector AnalyserNode architecture is correctly wired (visible filter peak/highlight on FFT, off-pitch test at 1000Hz correctly rejects 700Hz signal with only 'U' spurious — within tolerance), but the detector AnalyserNode's smoothingTimeConstant of 0.85 prevents the post-filter level from dropping below threshold during the ~80ms intra-symbol gaps, fusing the entire SOS message into one continuous ON state.",
+  "tested_scope": ["frontend", "integration", "bug-regression"],
+  "backend_issues": {"critical": [], "minor": []},
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [
+      {
+        "flow": "Bug 1 regression — decoding SOS @ 700Hz",
+        "issue": "decoded-text-output reads 'T' (single dash) instead of 'SOS'. Reproduced at thresholds 50, 80, 140, 180 — same 'T' result every time. Level stays clipped at 255 for the entire 2.2s of SOS playback, then decays slowly to 0 over ~1000ms AFTER audio ends, producing exactly one OFF edge → one dash → 'T'. auto-unit consequently clamps to max 300ms (WPM 4).",
+        "affected_selectors": ["[data-testid='decoded-text-output']", "[data-testid='wpm-readout']", "[data-testid='unit-readout']"],
+        "priority": "CRITICAL"
+      },
+      {
+        "flow": "Bug 2 regression — decoding noisy SOS @ 700Hz with broadband noise",
+        "issue": "decoded-text-output is empty after playback. Likely same root cause: the detector level is dominated by the smoothing constant and stays high until audio ends; with the noise the OFF transition may happen earlier/later but no symbols are committed in this run.",
+        "affected_selectors": ["[data-testid='decoded-text-output']"],
+        "priority": "CRITICAL"
+      }
+    ],
+    "design_issues": []
+  },
+  "passed_checks": [
+    "All required data-testids present and stable",
+    "capture-status-badge correctly transitions IDLE → LIVE on file-play-btn click",
+    "fft-canvas and wave-canvas both render content during playback (FFT non-black pixel count 3890, wave 21874)",
+    "FFT shows 700Hz pitch marker and threshold reference line",
+    "Pitch slider keyboard interaction works (700 → 1000 Hz via ArrowRight on the [role=slider] thumb)",
+    "Threshold slider keyboard interaction works (verified 140 → 80 → 50 → 180)",
+    "Off-pitch bandpass rejection: target=1000Hz, audio=700Hz → decoded 'U' (1-2 spurious chars, WITHIN the stated 1-2 char tolerance) — bandpass + separate detector wiring is functionally correct",
+    "Copy button: copies decoded text and shows 'Copied decoded text' sonner toast",
+    "Clear button: empties decoded-text-output to ''",
+    "No console errors during any of the playback runs"
+  ],
+  "rca_of_the_issue": {
+    "bug_id": "Bug 1 / Bug 2 incomplete fix",
+    "symptom": "SOS @ 700Hz → 'T'; noisy SOS → ''. The detector never sees the gaps between dots/dashes.",
+    "root_cause": "In ensureAudioCtx() the new detector AnalyserNode is created with smoothingTimeConstant=0.85. With FFT bin updates ~every 23ms and renderLoop reads via requestAnimationFrame (~16.7ms), a clipped peak of 255 from the bandpass-resonant 700Hz tone smooths down at ~15% per frame. After an 80ms intra-symbol gap (~3-5 frames) the smoothed level is still ~0.85^5 = 44% of 255 ≈ 113, well above any usable threshold. Result: the entire SOS message is one continuous ON, and the only OFF edge occurs ~1 second after the audio file ends (visible in the 100ms-cadence level capture: level=255 from t=200ms to t=2400ms, then slow decay 226→0 between t=2400ms and t=3400ms).",
+    "evidence": "Per-100ms level samples during SOS playback at threshold=140: 0,0,255,255,255,255,255,255,226,255,255,255,255,255,255,255,255,255,255,235,255,255,255,255,229,209,178,157,121,96,85,70,49,29,13,0,0,0,0,0. decoded becomes 'T' only after the slow tail crosses below threshold.",
+    "fix_recommendation": "Reduce detectorRef.smoothingTimeConstant to 0.1–0.3 (or 0). The bandpass filter already provides the frequency selectivity; the detector analyser should be high-temporal-resolution. Additionally consider widening the bandpass band (lower Q, e.g. Q=6-8) so that the post-filter envelope decays faster — though the Q=12 ringdown (~5.5ms) is actually fine; smoothing is the dominant decay term. Also consider raising MIN_EDGE_MS marginally only if false edges appear after the smoothing fix, and validating that auto-unit doesn't immediately clamp to max because the very first measured duration is the whole-file length.",
+    "reproduction_steps": [
+      "Synthesize /tmp/sos.wav with the script from the request (700Hz, unit_ms=80, noise_amp=0)",
+      "Open the app, click tab-file, select the WAV via file-input, click file-play-btn",
+      "Observe decoded-text-output → 'T'; unit-readout → 300; wpm-readout → 4",
+      "Repeating with threshold values 50, 80, 140, 180 all yield 'T'"
+    ]
+  },
+  "test_report_links": ["/tmp/synth.py", "/tmp/sos.wav", "/tmp/sos_noisy.wav", "/tmp/paris.wav"],
+  "action_items": [
+    "Lower detectorRef.smoothingTimeConstant from 0.85 to ~0.1-0.3 (or 0) in ensureAudioCtx() inside /app/frontend/src/components/MorseDecoder.jsx",
+    "After the smoothing fix, retest SOS @ 700Hz — expect decoded to contain 'S' and 'O', wpm-readout > 0, unit-readout near 80ms",
+    "Retest noisy SOS — expect at minimum 'S' or the first dots of 'S'",
+    "Optional: cap the initial dotDurations sample so a single very long edge cannot clamp the unit to 300ms (e.g. ignore samples > 4*current unit until two consistent samples are seen)"
+  ],
+  "critical_code_review_comments": [
+    "detectorRef smoothingTimeConstant=0.85 is the dominant time constant in the edge-detection chain and is at odds with the goal of resolving 80ms dots — this is the active bug",
+    "auto-unit can be poisoned by a single long initial duration: dotDurations.push(dur/3 for dash) — if dur happens to be the whole SOS message (~2200ms), the unit instantly jumps to clamp(300) and never recovers within a 3s file. Consider rejecting outliers or seeding dotDurations only after the second confirmed edge",
+    "filterRef + detectorRef are created lazily in ensureAudioCtx but the file source connects to filterRef.current directly — if ensureAudioCtx wasn't called yet on first interaction the wiring would be undefined. Currently safe because playFile awaits ensureAudioCtx, but worth a guard",
+    "MIN_EDGE_MS = 12ms is fine, but with smoothing 0.85 the rising edge is also smoothed — combined latency may shift apparent durations. After lowering smoothing, recheck that dot classification (dur < 2*unit) still holds"
+  ],
+  "updated_files": [],
+  "success_rate": {"backend": "N/A (no backend)", "frontend": "60% — UI + off-pitch + visualizers + copy/clear pass; the core bug-fix regression for Bug 1 and Bug 2 fails"},
+  "seed_data_creation": "Generated /tmp/sos.wav, /tmp/sos_noisy.wav, /tmp/paris.wav via /tmp/synth.py (Python wave module) per the synthesis script in the request",
+  "retest_needed": true,
+  "should_main_agent_self_test": false,
+  "context_for_next_testing_agent": "The synthetic WAVs at /tmp/sos.wav etc. are still on disk and can be reused. After the main agent lowers the detector smoothingTimeConstant, retest the exact same flow: tab-file → file-input → file-play-btn → wait ~4s → read decoded-text-output. The test infrastructure (focusing [role=slider] thumb and using ArrowLeft/Right to adjust sliders) works reliably. The off-pitch test (set pitch to 1000 and play sos.wav) is a useful negative control — it should remain near-empty (≤2 chars) after the fix."
+}
