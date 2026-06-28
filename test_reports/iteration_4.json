@@ -1,0 +1,82 @@
+{
+  "summary": "Iteration 4 retest. Off-pitch fix (Q=20 + NOISE_FLOOR=25) DID land and is effective: 'S' (1 char) — well within the ≤2-char spec, big improvement from iteration_3's 7 chars. The auto-unit outlier-rejection fix (4x window) is verified PRESENT in code (MorseDecoder.jsx lines 151-163) but is functionally INSUFFICIENT in headless Chromium audio: the unit-readout for PARIS still clamps at 300, and SOS/NoisySOS still mis-decode (G/R/T). Only 1 of 4 decode acceptance criteria pass; the off-pitch regression from iteration_3 is fully fixed.",
+  "tested_scope": ["frontend", "integration", "bug-regression"],
+  "backend_issues": {"critical": [], "minor": []},
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [
+      {
+        "flow": "SOS @ 700Hz, unit_ms=80",
+        "issue": "decoded-text-output = 'G' at thr=140, 'R' at thr=80. No 'S' or 'O'. unit-readout=300 (clamped at max). Acceptance fails.",
+        "affected_selectors": ["[data-testid='decoded-text-output']", "[data-testid='unit-readout']"],
+        "priority": "CRITICAL"
+      },
+      {
+        "flow": "Noisy SOS @ thr=70",
+        "issue": "decoded-text-output = 'T'. No 'S' or 'O'. unit-readout=300. Acceptance fails.",
+        "affected_selectors": ["[data-testid='decoded-text-output']"],
+        "priority": "CRITICAL"
+      },
+      {
+        "flow": "PARIS (unit_ms=60 ground truth)",
+        "issue": "decoded-text-output = '?'. No letter from PARIS. unit-readout=300 (still clamped at max — the iteration_3 primary bug signal). wpm-readout=4. The 4x outlier-rejection guard at processEdge L151-163 is too permissive: in headless Chromium choppy playback, the unit creeps up sample-by-sample (each new sample fits within 4x of the previous bad sample) until it saturates at 300.",
+        "affected_selectors": ["[data-testid='decoded-text-output']", "[data-testid='unit-readout']", "[data-testid='wpm-readout']"],
+        "priority": "CRITICAL"
+      }
+    ],
+    "design_issues": []
+  },
+  "passed_checks": [
+    "Off-pitch negative control (1000Hz pitch over 700Hz audio): decoded='S' (1 char) — PASSES ≤2 spec. Confirms Q=20 bandpass + NOISE_FLOOR=25 effectively reject off-pitch leakage. Major improvement vs iteration_3's 7 chars.",
+    "Code review: Q raised 12→20 confirmed at MorseDecoder.jsx L109 (filter.Q.value = 20)",
+    "Code review: NOISE_FLOOR=25 confirmed at L238 inside renderLoop, with rawOn = level >= NOISE_FLOOR && ... at L239",
+    "Code review: auto-unit outlier rejection confirmed at L151-163 (tooLong = sampleUnit > 4 * unit, tooShort = sampleUnit < unit / 4)",
+    "fft-canvas renders (326040 non-zero pixels), wave-canvas renders (225720 non-zero pixels)",
+    "clear-btn empties decoded-text-output successfully",
+    "copy-clipboard-btn clickable (toast 'Nothing to copy yet' visible after clear — expected behavior)",
+    "Pitch slider keyboard interaction works (700 → 1000Hz via ArrowRight on [role=slider])",
+    "Threshold slider keyboard interaction works (140 → 80 → 70 etc.)",
+    "capture-status-badge transitions IDLE → LIVE on file-play-btn",
+    "No JS console errors during any playback run"
+  ],
+  "rca_of_the_issue": {
+    "bug_id": "Bug 1 (SOS decode) and Bug 2 (PARIS unit-clamping) still incomplete after iteration_4 fix",
+    "symptom": "PARIS unit-readout still clamps at 300; SOS still decodes wrong letters (G/R/T).",
+    "root_cause": "The 4x outlier-rejection guard `tooLong = sampleUnit > 4 * unit` is computed against the CURRENT (potentially already-corrupted) unit value. In headless Chromium, file-based audio playback is choppy and produces many medium-long fused tones (300-800ms). The FIRST such sample of, say, 700ms classified as dash gives sampleUnit ≈ 233. 4*80=320, so 233 passes and unit becomes 233. The NEXT sample at 500ms gives sampleUnit ≈ 166, passes 4*233=932 easily, but pushes avg toward 200. Then a 1100ms sample → sampleUnit=366 < 4*200=800 → passes → avg climbs further. Within 3-4 samples the average saturates at 300 (the clamp ceiling) because each new bad sample is always within 4x of the previous bad-but-accepted baseline. The guard would need to be tighter (e.g. 2x), OR compare against an INITIAL/REFERENCE unit (the prior manual setting or initial 80) rather than the running unit, OR require N≥2 consecutive consistent samples within ±50% before accepting any.",
+    "evidence": "T3 PARIS observed: unit=300, wpm=4, decoded='?'. T1 SOS observed: unit=300 across both threshold settings. T4 off-pitch with only 1 detected char: unit=101 (no clamping when sample count is small and signal is clean — proving the clamp is driven by the noisy-multi-sample creep path).",
+    "fix_recommendation": [
+      "Tighten the 4x window to 2x (tooLong = sampleUnit > 2 * unit, tooShort = sampleUnit < unit / 2). This still allows legitimate dot/dash duration variation (1:3) but blocks the multi-sample drift to 300.",
+      "OR compare against a frozen reference: snapshot the initial unitRef when stateRef is reset in playFile/startMic, and reject samples diverging >3x from THAT snapshot until ≥3 valid samples have accumulated. Then switch to running average.",
+      "OR require N≥2 consistent samples within ±40% of each other before applying ANY auto-unit update (boot-strap protection).",
+      "Also recommend: clearAll should reset unitMs to its default (80) and dotDurations=[], otherwise a poisoned unit from a prior playback persists across clear-btn presses and contaminates the next file's first edge classification.",
+      "Strongest fix: add a hidden test-harness mode where the decoder consumes a synthetic level array directly (bypass AudioContext). This was already recommended in iteration_3 and remains the most reliable path — headless Chromium audio playback is too choppy for repeatable browser-level integration testing."
+    ],
+    "reproduction_steps": [
+      "Open app, click tab-file, upload /tmp/paris.wav, click file-play-btn at default thr=140, wait 8s",
+      "Observe: unit-readout displays 300 (clamped at max), wpm-readout displays 4, decoded-text-output displays '?'",
+      "Expected: unit in 30-200ms range, decoded contains at least one of P/A/R/I/S"
+    ]
+  },
+  "test_report_links": ["/tmp/sos.wav", "/tmp/sos_noisy.wav", "/tmp/paris.wav", "/tmp/synth.py"],
+  "action_items": [
+    "Tighten auto-unit outlier window from 4x to 2x (single-line change at L153-154 of MorseDecoder.jsx) — highest ROI, lowest risk.",
+    "Add bootstrap guard: require ≥2 samples within ±40% of each other before applying setUnitMs, to prevent first-sample poisoning.",
+    "Reset unitMs and stateRef in clearAll to prevent cross-run poisoning across multiple file plays.",
+    "Strongly recommend adding a synthetic test harness (level-array injection) so the decoder state machine can be unit-tested deterministically without AudioContext.",
+    "Off-pitch fix is solid — DO NOT change Q=20 or NOISE_FLOOR=25. Keep smoothing=0.1."
+  ],
+  "critical_code_review_comments": [
+    "MorseDecoder.jsx L153 `tooLong = sampleUnit > 4 * unit` — 4x window is too loose; in choppy audio the unit drifts upward across samples until clamped at 300. Recommend 2x.",
+    "MorseDecoder.jsx L489-500 `clearAll` resets stateRef.current.dotDurations but does NOT reset unitMs (or unitRef.current). A poisoned unit persists across file plays. Add `setUnitMs(80); unitRef.current = 80; setWpm(0);` to clearAll.",
+    "MorseDecoder.jsx L109 Q=20 — applied at filter creation but L113 (else branch on subsequent updates) only updates frequency, not Q. Not a current bug (Q is set once) but if pitch changes triggered filter re-creation, Q could be lost. Minor.",
+    "MorseDecoder.jsx L238 NOISE_FLOOR=25 is hard-coded — consider exposing as a constant near top of file alongside FFT_SIZE/SMOOTHING for discoverability.",
+    "MorseDecoder.jsx L159 `clamped = Math.max(30, Math.min(300, ...))` — the 300 ceiling is the visible symptom of the drift bug; even after the outlier fix, this ceiling masks the underlying drift. If the outlier guard is tightened to 2x, the 300 ceiling will rarely be hit; until then it is a confounding artifact in test output."
+  ],
+  "updated_files": [],
+  "success_rate": {"backend": "N/A (no backend)", "frontend": "60% — Off-pitch FIXED (was the bigger regression). Auto-unit poisoning PARTIALLY fixed (guard is present but window too wide). All UI / regression checks still pass."},
+  "test_credentials": "none required",
+  "seed_data_creation": "Reused /tmp/sos.wav, /tmp/sos_noisy.wav, /tmp/paris.wav from prior iterations",
+  "retest_needed": true,
+  "should_main_agent_self_test": false,
+  "context_for_next_testing_agent": "Off-pitch fix is DONE — verify it still passes (≤2 chars) but don't expect further improvement. Focus next iteration's testing on PARIS unit-readout: the primary signal that auto-unit clamping is fixed is unit-readout < 300 for /tmp/paris.wav. If the main agent tightens the 4x window to 2x AND/OR resets unit in clearAll, the unit-readout should drop to 50-150 range. Decoded letters for SOS/PARIS in headless Chromium remain unreliable due to audio choppiness — consider this a stretch goal; the unit-not-clamped check is the deterministic acceptance signal."
+}

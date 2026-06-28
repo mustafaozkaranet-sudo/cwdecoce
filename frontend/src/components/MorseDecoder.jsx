@@ -106,7 +106,7 @@ export default function MorseDecoder() {
       const f = audioCtxRef.current.createBiquadFilter();
       f.type = "bandpass";
       f.frequency.value = pitchRef.current;
-      f.Q.value = 12;
+      f.Q.value = 20;
       f.connect(detectorRef.current);
       filterRef.current = f;
     } else {
@@ -148,13 +148,19 @@ export default function MorseDecoder() {
       if (autoUnitRef.current) {
         // Both dots and dashes contribute (dash ≈ 3 units)
         const sampleUnit = isDot ? dur : dur / 3;
-        st.dotDurations.push(sampleUnit);
-        if (st.dotDurations.length > 10) st.dotDurations.shift();
-        const avg = st.dotDurations.reduce((a, b) => a + b, 0) / st.dotDurations.length;
-        const clamped = Math.max(30, Math.min(300, Math.round(avg)));
-        setUnitMs(clamped);
-        unitRef.current = clamped;
-        setWpm(Math.round(1200 / clamped));
+        // Outlier rejection: ignore samples that diverge wildly from current unit.
+        // Prevents a single fused/long tone from clamping unit to max and breaking decoding.
+        const tooLong = sampleUnit > 4 * unit;
+        const tooShort = sampleUnit < unit / 4;
+        if (!tooLong && !tooShort) {
+          st.dotDurations.push(sampleUnit);
+          if (st.dotDurations.length > 10) st.dotDurations.shift();
+          const avg = st.dotDurations.reduce((a, b) => a + b, 0) / st.dotDurations.length;
+          const clamped = Math.max(30, Math.min(300, Math.round(avg)));
+          setUnitMs(clamped);
+          unitRef.current = clamped;
+          setWpm(Math.round(1200 / clamped));
+        }
       }
     } else if (!st.isOn && newState) {
       // silence just ended -> classify gap
@@ -224,12 +230,15 @@ export default function MorseDecoder() {
       setSignalLevel(level);
 
       const thr = thresholdRef.current;
-      // Schmitt-trigger hysteresis: widen the on/off thresholds
+      // Schmitt-trigger hysteresis: widen the on/off thresholds.
+      // Absolute floor — any level below NOISE_FLOOR is treated as silence regardless
+      // of the user-set threshold, to reject bandpass-rejected leakage from off-pitch tones.
       const st = stateRef.current;
       const HYST = Math.max(4, thr * 0.08);
-      const rawOn = st.isOn
+      const NOISE_FLOOR = 25;
+      const rawOn = level >= NOISE_FLOOR && (st.isOn
         ? level > thr - HYST
-        : level > thr + HYST;
+        : level > thr + HYST);
       setSignalOn(rawOn);
 
       const nowMs = performance.now();
