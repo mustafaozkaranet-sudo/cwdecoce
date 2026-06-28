@@ -148,18 +148,21 @@ export default function MorseDecoder() {
       if (autoUnitRef.current) {
         // Both dots and dashes contribute (dash ≈ 3 units)
         const sampleUnit = isDot ? dur : dur / 3;
-        // Outlier rejection: ignore samples that diverge wildly from current unit.
-        // Prevents a single fused/long tone from clamping unit to max and breaking decoding.
-        const tooLong = sampleUnit > 4 * unit;
-        const tooShort = sampleUnit < unit / 4;
+        // Tight outlier rejection: samples must be within 0.5×–2× of the current unit.
+        // Prevents fused or choppy tones from drifting the unit up to the ceiling.
+        const tooLong = sampleUnit > 2 * unit;
+        const tooShort = sampleUnit < unit / 2;
         if (!tooLong && !tooShort) {
           st.dotDurations.push(sampleUnit);
           if (st.dotDurations.length > 10) st.dotDurations.shift();
-          const avg = st.dotDurations.reduce((a, b) => a + b, 0) / st.dotDurations.length;
-          const clamped = Math.max(30, Math.min(300, Math.round(avg)));
-          setUnitMs(clamped);
-          unitRef.current = clamped;
-          setWpm(Math.round(1200 / clamped));
+          // Bootstrap: don't apply unit update until ≥2 consistent samples accumulated
+          if (st.dotDurations.length >= 2) {
+            const avg = st.dotDurations.reduce((a, b) => a + b, 0) / st.dotDurations.length;
+            const clamped = Math.max(30, Math.min(300, Math.round(avg)));
+            setUnitMs(clamped);
+            unitRef.current = clamped;
+            setWpm(Math.round(1200 / clamped));
+          }
         }
       }
     } else if (!st.isOn && newState) {
@@ -374,6 +377,11 @@ export default function MorseDecoder() {
       src.connect(filterRef.current);
       micSourceRef.current = src;
       setRunning(true);
+      if (autoUnitRef.current) {
+        setUnitMs(80);
+        unitRef.current = 80;
+        setWpm(0);
+      }
       stateRef.current = {
         isOn: false,
         lastEdgeAt: 0,
@@ -451,6 +459,11 @@ export default function MorseDecoder() {
     filePlayingRef.current = true;
     setFilePlaying(true);
     setRunning(true);
+    if (autoUnitRef.current) {
+      setUnitMs(80);
+      unitRef.current = 80;
+      setWpm(0);
+    }
     stateRef.current = {
       isOn: false,
       lastEdgeAt: 0,
@@ -489,6 +502,9 @@ export default function MorseDecoder() {
   const clearAll = useCallback(() => {
     setDecoded("");
     setCurrentSymbol("");
+    setUnitMs(80);
+    unitRef.current = 80;
+    setWpm(0);
     stateRef.current = {
       isOn: false,
       lastEdgeAt: 0,
