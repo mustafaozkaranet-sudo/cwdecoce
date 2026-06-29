@@ -535,7 +535,7 @@ export default function MorseDecoder() {
           <Radio className="h-5 w-5 text-[#00FF66]" />
           <div className="flex items-baseline gap-3">
             <span className="font-[JetBrains_Mono,monospace] text-lg font-bold tracking-tight">
-              SDR-01
+              TA3EDU
             </span>
             <span className="text-[10px] tracking-[0.3em] uppercase text-[#80B399]">
               Morse Decoder // Web Audio
@@ -814,7 +814,7 @@ export default function MorseDecoder() {
       </div>
 
       <footer className="px-4 md:px-6 py-3 text-[10px] tracking-[0.3em] uppercase text-[#334D40] border-t border-[#1A3324]">
-        SDR-01 // Web Audio API · AnalyserNode · FFT {FFT_SIZE}
+        TA3EDU // Web Audio API · AnalyserNode · FFT {FFT_SIZE}
       </footer>
     </div>
   );
