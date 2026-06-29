@@ -583,7 +583,7 @@ export default function MorseDecoder() {
     }, 1500);
   }, [running]);
 
-  // ----- Auto threshold -----
+  // ----- Auto threshold (Otsu-like bimodal split, biased to signal side) -----
   const autoTuneThreshold = useCallback(() => {
     if (!running) {
       toast.error("Start the mic or play a file first");
@@ -596,24 +596,56 @@ export default function MorseDecoder() {
       const samples = calibThrSamplesRef.current || [];
       calibThrSamplesRef.current = null;
       setCalibrating(null);
-      if (samples.length < 20) {
+      if (samples.length < 30) {
         toast.error("Not enough samples — try again");
         return;
       }
-      const sorted = [...samples].sort((a, b) => a - b);
-      const p20 = sorted[Math.floor(sorted.length * 0.2)];
-      const p90 = sorted[Math.floor(sorted.length * 0.9)];
-      const span = p90 - p20;
-      if (span < 25) {
-        toast.error("Signal too weak / no keying detected");
+      // Build a 256-bin histogram of detector levels
+      const hist = new Uint32Array(256);
+      let minV = 255, maxV = 0;
+      for (const s of samples) {
+        const v = Math.max(0, Math.min(255, Math.round(s)));
+        hist[v]++;
+        if (v < minV) minV = v;
+        if (v > maxV) maxV = v;
+      }
+      if (maxV - minV < 30) {
+        toast.error("Signal too flat — key while calibrating");
         return;
       }
-      const newThr = Math.round(p20 + span * 0.4);
-      const clamped = Math.max(20, Math.min(250, newThr));
+      // Otsu's method — find the threshold that maximises between-class variance
+      const total = samples.length;
+      let sumAll = 0;
+      for (let i = 0; i < 256; i++) sumAll += i * hist[i];
+      let wB = 0, sumB = 0, maxVar = -1, otsu = minV;
+      for (let t = minV; t <= maxV; t++) {
+        wB += hist[t];
+        if (wB === 0) continue;
+        const wF = total - wB;
+        if (wF === 0) break;
+        sumB += t * hist[t];
+        const mB = sumB / wB;
+        const mF = (sumAll - sumB) / wF;
+        const between = wB * wF * (mB - mF) * (mB - mF);
+        if (between > maxVar) { maxVar = between; otsu = t; }
+      }
+      // Class means around the chosen split
+      let wB2 = 0, sB2 = 0, wF2 = 0, sF2 = 0;
+      for (let i = 0; i <= otsu; i++) { wB2 += hist[i]; sB2 += i * hist[i]; }
+      for (let i = otsu + 1; i < 256; i++) { wF2 += hist[i]; sF2 += i * hist[i]; }
+      const noiseMean = wB2 > 0 ? sB2 / wB2 : minV;
+      const signalMean = wF2 > 0 ? sF2 / wF2 : maxV;
+      if (signalMean - noiseMean < 20) {
+        toast.error("Couldn't separate signal from noise — try again");
+        return;
+      }
+      // Bias the threshold to ~65% of the gap so we're firmly above the noise band
+      const biased = noiseMean + 0.65 * (signalMean - noiseMean);
+      const clamped = Math.max(20, Math.min(250, Math.round(biased)));
       setThreshold(clamped);
       setActivePreset(null);
       toast.success(`Threshold set → ${clamped}`);
-    }, 2000);
+    }, 3000);
   }, [running]);
 
   // ----- Presets A/B -----
@@ -717,25 +749,66 @@ export default function MorseDecoder() {
             />
             <div className="pointer-events-none absolute inset-0 scanlines" />
           </div>
+
+          {/* Decoded stream — directly under waveform */}
+          <section className="border border-[#1A3324] bg-[#0A0A0A] p-4">
+            <div className="flex items-center justify-between mb-3">
+              <div className="flex items-center gap-3">
+                <span className="text-xs tracking-[0.3em] uppercase text-[#80B399]">
+                  Decoded Stream
+                </span>
+                <span className="font-[JetBrains_Mono,monospace] text-[#FFB000] text-sm" data-testid="current-symbol">
+                  {currentSymbol || "·"}
+                </span>
+              </div>
+              <div className="flex items-center gap-2">
+                <Button
+                  data-testid="copy-clipboard-btn"
+                  onClick={copyDecoded}
+                  className="rounded-none bg-transparent border border-[#1A3324] text-[#00FF66] hover:bg-[#00FF66] hover:text-black h-9 px-3 font-[JetBrains_Mono,monospace] tracking-[0.2em] uppercase text-xs"
+                >
+                  <Copy className="h-3 w-3 mr-1" /> Copy
+                </Button>
+                <Button
+                  data-testid="clear-btn"
+                  onClick={clearAll}
+                  className="rounded-none bg-transparent border border-[#1A3324] text-[#FFB000] hover:bg-[#FFB000] hover:text-black h-9 px-3 font-[JetBrains_Mono,monospace] tracking-[0.2em] uppercase text-xs"
+                >
+                  <Trash2 className="h-3 w-3 mr-1" /> Clear
+                </Button>
+              </div>
+            </div>
+            <div
+              data-testid="decoded-text-output"
+              className="font-[JetBrains_Mono,monospace] text-xl md:text-3xl text-[#00FF66] tracking-[0.15em] min-h-[120px] bg-black border border-[#1A3324] p-4 whitespace-pre-wrap break-words"
+              style={{ textShadow: "0 0 6px rgba(0,255,102,0.55)" }}
+            >
+              {decoded}
+              <span className="inline-block w-2 h-6 align-middle ml-1 bg-[#00FF66] animate-pulse" />
+            </div>
+            <div className="mt-2 text-xs tracking-[0.25em] uppercase text-[#334D40]">
+              Intra-symbol gaps are ignored. Pause &gt; 3× unit = letter. Pause &gt; 7× unit = word.
+            </div>
+          </section>
         </div>
 
         {/* Controls */}
-        <aside className="col-span-1 lg:col-span-4 border border-[#1A3324] bg-[#0A0A0A] p-4 flex flex-col gap-5">
+        <aside className="col-span-1 lg:col-span-4 border border-[#1A3324] bg-[#0A0A0A] p-5 flex flex-col gap-7">
           <Tabs value={source} onValueChange={(v) => { stopAll(); setSource(v); }} className="w-full">
-            <TabsList className="w-full grid grid-cols-2 rounded-none bg-[#050505] p-0 h-10 border border-[#1A3324]">
+            <TabsList className="w-full grid grid-cols-2 rounded-none bg-[#050505] p-0 h-12 border border-[#1A3324]">
               <TabsTrigger
                 value="mic"
                 data-testid="tab-mic"
-                className="rounded-none data-[state=active]:bg-[#00FF66] data-[state=active]:text-black text-[#80B399] font-[JetBrains_Mono,monospace] tracking-[0.2em] uppercase text-xs"
+                className="rounded-none data-[state=active]:bg-[#00FF66] data-[state=active]:text-black text-[#80B399] font-[JetBrains_Mono,monospace] tracking-[0.2em] uppercase text-sm"
               >
-                <Mic className="h-3 w-3 mr-1" /> Mic
+                <Mic className="h-4 w-4 mr-2" /> Mic
               </TabsTrigger>
               <TabsTrigger
                 value="file"
                 data-testid="tab-file"
-                className="rounded-none data-[state=active]:bg-[#00FF66] data-[state=active]:text-black text-[#80B399] font-[JetBrains_Mono,monospace] tracking-[0.2em] uppercase text-xs"
+                className="rounded-none data-[state=active]:bg-[#00FF66] data-[state=active]:text-black text-[#80B399] font-[JetBrains_Mono,monospace] tracking-[0.2em] uppercase text-sm"
               >
-                <Upload className="h-3 w-3 mr-1" /> File
+                <Upload className="h-4 w-4 mr-2" /> File
               </TabsTrigger>
             </TabsList>
 
@@ -745,17 +818,17 @@ export default function MorseDecoder() {
                   <Button
                     data-testid="mic-start-btn"
                     onClick={startMic}
-                    className="rounded-none bg-[#00FF66] text-black hover:bg-[#FFB000] hover:text-black font-[JetBrains_Mono,monospace] tracking-[0.2em] uppercase text-xs flex-1"
+                    className="rounded-none bg-[#00FF66] text-black hover:bg-[#FFB000] hover:text-black font-[JetBrains_Mono,monospace] tracking-[0.2em] uppercase text-sm flex-1 h-12"
                   >
-                    <Mic className="h-4 w-4 mr-2" /> Start Capture
+                    <Mic className="h-5 w-5 mr-2" /> Start Capture
                   </Button>
                 ) : (
                   <Button
                     data-testid="mic-stop-btn"
                     onClick={stopAll}
-                    className="rounded-none bg-[#FFB000] text-black hover:bg-[#00FF66] font-[JetBrains_Mono,monospace] tracking-[0.2em] uppercase text-xs flex-1"
+                    className="rounded-none bg-[#FFB000] text-black hover:bg-[#00FF66] font-[JetBrains_Mono,monospace] tracking-[0.2em] uppercase text-sm flex-1 h-12"
                   >
-                    <MicOff className="h-4 w-4 mr-2" /> Stop
+                    <MicOff className="h-5 w-5 mr-2" /> Stop
                   </Button>
                 )}
               </div>
@@ -766,11 +839,11 @@ export default function MorseDecoder() {
                 htmlFor="audio-file-input"
                 onDragOver={(e) => e.preventDefault()}
                 onDrop={onDropFile}
-                className="block border border-dashed border-[#1A3324] hover:border-[#00FF66] transition-colors p-3 cursor-pointer text-center"
+                className="block border border-dashed border-[#1A3324] hover:border-[#00FF66] transition-colors p-4 cursor-pointer text-center"
                 data-testid="file-drop-zone"
               >
-                <Upload className="h-4 w-4 inline mr-2 text-[#80B399]" />
-                <span className="text-[11px] tracking-[0.2em] uppercase text-[#80B399]">
+                <Upload className="h-5 w-5 inline mr-2 text-[#80B399]" />
+                <span className="text-sm tracking-[0.2em] uppercase text-[#80B399]">
                   {audioFileName || "Drop / Pick .wav .mp3"}
                 </span>
                 <input
@@ -788,17 +861,17 @@ export default function MorseDecoder() {
                     data-testid="file-play-btn"
                     onClick={playFile}
                     disabled={!audioFileName}
-                    className="rounded-none bg-[#00FF66] text-black hover:bg-[#FFB000] disabled:opacity-40 font-[JetBrains_Mono,monospace] tracking-[0.2em] uppercase text-xs flex-1"
+                    className="rounded-none bg-[#00FF66] text-black hover:bg-[#FFB000] disabled:opacity-40 font-[JetBrains_Mono,monospace] tracking-[0.2em] uppercase text-sm flex-1 h-12"
                   >
-                    <Play className="h-4 w-4 mr-2" /> Play
+                    <Play className="h-5 w-5 mr-2" /> Play
                   </Button>
                 ) : (
                   <Button
                     data-testid="file-stop-btn"
                     onClick={stopAll}
-                    className="rounded-none bg-[#FFB000] text-black hover:bg-[#00FF66] font-[JetBrains_Mono,monospace] tracking-[0.2em] uppercase text-xs flex-1"
+                    className="rounded-none bg-[#FFB000] text-black hover:bg-[#00FF66] font-[JetBrains_Mono,monospace] tracking-[0.2em] uppercase text-sm flex-1 h-12"
                   >
-                    <Square className="h-4 w-4 mr-2" /> Stop
+                    <Square className="h-5 w-5 mr-2" /> Stop
                   </Button>
                 )}
               </div>
@@ -808,10 +881,10 @@ export default function MorseDecoder() {
           {/* Gain */}
           <div>
             <div className="flex items-baseline justify-between mb-2">
-              <label className="text-xs tracking-[0.3em] uppercase text-[#80B399] flex items-center gap-2">
-                <Volume2 className="h-3 w-3" /> Input Gain
+              <label className="text-sm tracking-[0.3em] uppercase text-[#80B399] flex items-center gap-2">
+                <Volume2 className="h-4 w-4" /> Input Gain
               </label>
-              <span data-testid="gain-readout" className="font-[JetBrains_Mono,monospace] text-[#00FF66] text-base">
+              <span data-testid="gain-readout" className="font-[JetBrains_Mono,monospace] text-[#00FF66] text-lg">
                 {gain.toFixed(2)}×
               </span>
             </div>
@@ -822,37 +895,37 @@ export default function MorseDecoder() {
               step={0.05}
               value={[gain]}
               onValueChange={([v]) => setGain(v)}
-              className="[&_[role=slider]]:rounded-none [&_[role=slider]]:bg-[#00FF66] [&_[role=slider]]:border-[#00FF66] [&_[role=slider]]:h-4 [&_[role=slider]]:w-3 [&>span:first-child]:bg-[#1A3324] [&>span:first-child>span]:bg-[#00FF66]"
+              className="[&_[role=slider]]:rounded-none [&_[role=slider]]:bg-[#00FF66] [&_[role=slider]]:border-[#00FF66] [&_[role=slider]]:h-5 [&_[role=slider]]:w-4 [&>span:first-child]:h-1.5 [&>span:first-child]:bg-[#1A3324] [&>span:first-child>span]:bg-[#00FF66]"
             />
           </div>
 
           {/* Presets A/B */}
           <div>
-            <div className="text-xs tracking-[0.3em] uppercase text-[#80B399] mb-2 flex items-center gap-2">
-              <Bookmark className="h-3 w-3" /> Presets
+            <div className="text-sm tracking-[0.3em] uppercase text-[#80B399] mb-3 flex items-center gap-2">
+              <Bookmark className="h-4 w-4" /> Presets
             </div>
-            <div className="grid grid-cols-2 gap-2">
+            <div className="grid grid-cols-2 gap-3">
               {[
                 { key: "A", data: presetA },
                 { key: "B", data: presetB },
               ].map(({ key, data }) => (
-                <div key={key} className={`border ${activePreset === key ? "border-[#00FF66]" : "border-[#1A3324]"} p-2 flex flex-col gap-2`}>
+                <div key={key} className={`border ${activePreset === key ? "border-[#00FF66]" : "border-[#1A3324]"} p-3 flex flex-col gap-2`}>
                   <button
                     data-testid={`preset-${key.toLowerCase()}-recall-btn`}
                     onClick={() => recallPreset(key)}
-                    className={`flex items-center justify-between font-[JetBrains_Mono,monospace] text-base tracking-wider px-1 py-1 ${activePreset === key ? "text-black bg-[#00FF66]" : "text-[#00FF66] hover:text-black hover:bg-[#00FF66]"} transition-colors`}
+                    className={`flex items-center justify-between font-[JetBrains_Mono,monospace] tracking-wider px-2 py-2 ${activePreset === key ? "text-black bg-[#00FF66]" : "text-[#00FF66] hover:text-black hover:bg-[#00FF66]"} transition-colors`}
                   >
-                    <span className="font-bold">{key}</span>
-                    <span className="text-xs opacity-80" data-testid={`preset-${key.toLowerCase()}-values`}>
+                    <span className="text-2xl font-bold">{key}</span>
+                    <span className="text-xs opacity-80 leading-tight text-right" data-testid={`preset-${key.toLowerCase()}-values`}>
                       {data.pitch}Hz · {data.threshold}
                     </span>
                   </button>
                   <button
                     data-testid={`preset-${key.toLowerCase()}-save-btn`}
                     onClick={() => savePreset(key)}
-                    className="flex items-center justify-center gap-1 text-[10px] tracking-[0.25em] uppercase text-[#FFB000] border border-[#332300] hover:border-[#FFB000] hover:bg-[#FFB000] hover:text-black transition-colors py-1"
+                    className="flex items-center justify-center gap-2 text-xs tracking-[0.25em] uppercase text-[#FFB000] border border-[#332300] hover:border-[#FFB000] hover:bg-[#FFB000] hover:text-black transition-colors py-2"
                   >
-                    <Save className="h-3 w-3" /> Save
+                    <Save className="h-4 w-4" /> Save
                   </button>
                 </div>
               ))}
@@ -862,19 +935,19 @@ export default function MorseDecoder() {
           {/* Pitch */}
           <div>
             <div className="flex items-baseline justify-between mb-2">
-              <label className="text-xs tracking-[0.3em] uppercase text-[#80B399] flex items-center gap-2">
-                <Target className="h-3 w-3" /> Target Pitch
+              <label className="text-sm tracking-[0.3em] uppercase text-[#80B399] flex items-center gap-2">
+                <Target className="h-4 w-4" /> Target Pitch
               </label>
-              <div className="flex items-center gap-2">
+              <div className="flex items-center gap-3">
                 <button
                   data-testid="auto-pitch-btn"
                   onClick={autoTunePitch}
                   disabled={calibrating !== null}
-                  className={`text-[10px] tracking-[0.25em] uppercase border px-2 py-0.5 transition-colors ${calibrating === "pitch" ? "border-[#FFB000] text-[#FFB000] animate-pulse" : "border-[#1A3324] text-[#80B399] hover:border-[#00FF66] hover:text-[#00FF66]"} disabled:opacity-40`}
+                  className={`text-xs tracking-[0.25em] uppercase border px-3 py-1 transition-colors ${calibrating === "pitch" ? "border-[#FFB000] text-[#FFB000] animate-pulse" : "border-[#1A3324] text-[#80B399] hover:border-[#00FF66] hover:text-[#00FF66]"} disabled:opacity-40`}
                 >
                   {calibrating === "pitch" ? "Listening…" : "Auto"}
                 </button>
-                <span data-testid="pitch-readout" className="font-[JetBrains_Mono,monospace] text-[#00FF66] text-base">
+                <span data-testid="pitch-readout" className="font-[JetBrains_Mono,monospace] text-[#00FF66] text-lg">
                   {pitch} Hz
                 </span>
               </div>
@@ -886,26 +959,26 @@ export default function MorseDecoder() {
               step={10}
               value={[pitch]}
               onValueChange={([v]) => { setPitch(v); setActivePreset(null); }}
-              className="[&_[role=slider]]:rounded-none [&_[role=slider]]:bg-[#00FF66] [&_[role=slider]]:border-[#00FF66] [&_[role=slider]]:h-4 [&_[role=slider]]:w-3 [&>span:first-child]:bg-[#1A3324] [&>span:first-child>span]:bg-[#00FF66]"
+              className="[&_[role=slider]]:rounded-none [&_[role=slider]]:bg-[#00FF66] [&_[role=slider]]:border-[#00FF66] [&_[role=slider]]:h-5 [&_[role=slider]]:w-4 [&>span:first-child]:h-1.5 [&>span:first-child]:bg-[#1A3324] [&>span:first-child>span]:bg-[#00FF66]"
             />
           </div>
 
           {/* Threshold */}
           <div>
             <div className="flex items-baseline justify-between mb-2">
-              <label className="text-xs tracking-[0.3em] uppercase text-[#80B399] flex items-center gap-2">
-                <Gauge className="h-3 w-3" /> Threshold
+              <label className="text-sm tracking-[0.3em] uppercase text-[#80B399] flex items-center gap-2">
+                <Gauge className="h-4 w-4" /> Threshold
               </label>
-              <div className="flex items-center gap-2">
+              <div className="flex items-center gap-3">
                 <button
                   data-testid="auto-threshold-btn"
                   onClick={autoTuneThreshold}
                   disabled={calibrating !== null}
-                  className={`text-[10px] tracking-[0.25em] uppercase border px-2 py-0.5 transition-colors ${calibrating === "threshold" ? "border-[#FFB000] text-[#FFB000] animate-pulse" : "border-[#1A3324] text-[#80B399] hover:border-[#FFB000] hover:text-[#FFB000]"} disabled:opacity-40`}
+                  className={`text-xs tracking-[0.25em] uppercase border px-3 py-1 transition-colors ${calibrating === "threshold" ? "border-[#FFB000] text-[#FFB000] animate-pulse" : "border-[#1A3324] text-[#80B399] hover:border-[#FFB000] hover:text-[#FFB000]"} disabled:opacity-40`}
                 >
                   {calibrating === "threshold" ? "Listening…" : "Auto"}
                 </button>
-                <span data-testid="threshold-readout" className="font-[JetBrains_Mono,monospace] text-[#FFB000] text-base">
+                <span data-testid="threshold-readout" className="font-[JetBrains_Mono,monospace] text-[#FFB000] text-lg">
                   {threshold}
                 </span>
               </div>
@@ -917,9 +990,9 @@ export default function MorseDecoder() {
               step={1}
               value={[threshold]}
               onValueChange={([v]) => { setThreshold(v); setActivePreset(null); }}
-              className="[&_[role=slider]]:rounded-none [&_[role=slider]]:bg-[#FFB000] [&_[role=slider]]:border-[#FFB000] [&_[role=slider]]:h-4 [&_[role=slider]]:w-3 [&>span:first-child]:bg-[#1A3324] [&>span:first-child>span]:bg-[#FFB000]"
+              className="[&_[role=slider]]:rounded-none [&_[role=slider]]:bg-[#FFB000] [&_[role=slider]]:border-[#FFB000] [&_[role=slider]]:h-5 [&_[role=slider]]:w-4 [&>span:first-child]:h-1.5 [&>span:first-child]:bg-[#1A3324] [&>span:first-child>span]:bg-[#FFB000]"
             />
-            <div className="mt-1 h-1 bg-[#1A3324] relative">
+            <div className="mt-2 h-1.5 bg-[#1A3324] relative">
               <div
                 data-testid="level-bar"
                 className="absolute inset-y-0 left-0 transition-[width] duration-75"
@@ -936,26 +1009,26 @@ export default function MorseDecoder() {
           </div>
 
           {/* Unit / WPM */}
-          <div className="grid grid-cols-2 gap-2 pt-1">
-            <div className="border border-[#1A3324] p-2">
-              <div className="text-[10px] tracking-[0.25em] uppercase text-[#80B399]">WPM</div>
-              <div data-testid="wpm-readout" className="font-[JetBrains_Mono,monospace] text-3xl text-[#FFB000] tracking-wider">
+          <div className="grid grid-cols-2 gap-3 pt-1">
+            <div className="border border-[#1A3324] p-3">
+              <div className="text-xs tracking-[0.25em] uppercase text-[#80B399]">WPM</div>
+              <div data-testid="wpm-readout" className="font-[JetBrains_Mono,monospace] text-4xl text-[#FFB000] tracking-wider">
                 {wpm || "—"}
               </div>
             </div>
-            <div className="border border-[#1A3324] p-2">
-              <div className="text-[10px] tracking-[0.25em] uppercase text-[#80B399]">Unit (ms)</div>
-              <div data-testid="unit-readout" className="font-[JetBrains_Mono,monospace] text-3xl text-[#00FF66] tracking-wider">
+            <div className="border border-[#1A3324] p-3">
+              <div className="text-xs tracking-[0.25em] uppercase text-[#80B399]">Unit (ms)</div>
+              <div data-testid="unit-readout" className="font-[JetBrains_Mono,monospace] text-4xl text-[#00FF66] tracking-wider">
                 {unitMs}
               </div>
             </div>
           </div>
 
-          <div className="flex items-center justify-between text-xs tracking-[0.25em] uppercase text-[#80B399]">
+          <div className="flex items-center justify-between gap-3 text-xs tracking-[0.25em] uppercase text-[#80B399]">
             <button
               data-testid="auto-unit-toggle"
               onClick={() => setAutoUnit((v) => !v)}
-              className={`px-2 py-1 border ${autoUnit ? "border-[#00FF66] text-[#00FF66]" : "border-[#1A3324] text-[#80B399]"} hover:border-[#00FF66] hover:text-[#00FF66] transition-colors`}
+              className={`px-3 py-2 border ${autoUnit ? "border-[#00FF66] text-[#00FF66]" : "border-[#1A3324] text-[#80B399]"} hover:border-[#00FF66] hover:text-[#00FF66] transition-colors whitespace-nowrap`}
             >
               Auto unit: {autoUnit ? "ON" : "OFF"}
             </button>
@@ -967,51 +1040,10 @@ export default function MorseDecoder() {
               value={[unitMs]}
               onValueChange={([v]) => { setUnitMs(v); setWpm(Math.round(1200 / v)); }}
               disabled={autoUnit}
-              className="flex-1 ml-3 [&_[role=slider]]:rounded-none [&_[role=slider]]:bg-[#00FF66] [&_[role=slider]]:border-[#00FF66] [&_[role=slider]]:h-3 [&_[role=slider]]:w-3 [&>span:first-child]:bg-[#1A3324] [&>span:first-child>span]:bg-[#00FF66] disabled:opacity-40"
+              className="flex-1 [&_[role=slider]]:rounded-none [&_[role=slider]]:bg-[#00FF66] [&_[role=slider]]:border-[#00FF66] [&_[role=slider]]:h-4 [&_[role=slider]]:w-3 [&>span:first-child]:bg-[#1A3324] [&>span:first-child>span]:bg-[#00FF66] disabled:opacity-40"
             />
           </div>
         </aside>
-
-        {/* Decoder output bottom */}
-        <section className="col-span-1 lg:col-span-12 border border-[#1A3324] bg-[#0A0A0A] p-4">
-          <div className="flex items-center justify-between mb-3">
-            <div className="flex items-center gap-3">
-              <span className="text-xs tracking-[0.3em] uppercase text-[#80B399]">
-                Decoded Stream
-              </span>
-              <span className="font-[JetBrains_Mono,monospace] text-[#FFB000] text-sm" data-testid="current-symbol">
-                {currentSymbol || "·"}
-              </span>
-            </div>
-            <div className="flex items-center gap-2">
-              <Button
-                data-testid="copy-clipboard-btn"
-                onClick={copyDecoded}
-                className="rounded-none bg-transparent border border-[#1A3324] text-[#00FF66] hover:bg-[#00FF66] hover:text-black h-9 px-3 font-[JetBrains_Mono,monospace] tracking-[0.2em] uppercase text-xs"
-              >
-                <Copy className="h-3 w-3 mr-1" /> Copy
-              </Button>
-              <Button
-                data-testid="clear-btn"
-                onClick={clearAll}
-                className="rounded-none bg-transparent border border-[#1A3324] text-[#FFB000] hover:bg-[#FFB000] hover:text-black h-9 px-3 font-[JetBrains_Mono,monospace] tracking-[0.2em] uppercase text-xs"
-              >
-                <Trash2 className="h-3 w-3 mr-1" /> Clear
-              </Button>
-            </div>
-          </div>
-          <div
-            data-testid="decoded-text-output"
-            className="font-[JetBrains_Mono,monospace] text-xl md:text-3xl text-[#00FF66] tracking-[0.15em] min-h-[90px] bg-black border border-[#1A3324] p-4 whitespace-pre-wrap break-words"
-            style={{ textShadow: "0 0 6px rgba(0,255,102,0.55)" }}
-          >
-            {decoded}
-            <span className="inline-block w-2 h-6 align-middle ml-1 bg-[#00FF66] animate-pulse" />
-          </div>
-          <div className="mt-2 text-xs tracking-[0.25em] uppercase text-[#334D40]">
-            Intra-symbol gaps are ignored. Pause &gt; 3× unit = letter. Pause &gt; 7× unit = word.
-          </div>
-        </section>
       </div>
 
       <footer className="px-4 md:px-6 py-3 text-xs tracking-[0.3em] uppercase text-[#334D40] border-t border-[#1A3324]">

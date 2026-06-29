@@ -1,0 +1,45 @@
+{
+  "summary": "Iteration 8 (frontend only) — verified the Otsu-based auto-threshold fix and the layout/sizing changes. MAIN BUG FIXED: feeding /app/frontend/public/sos_long.wav (700Hz, 6× SOS, ~17s) and triggering auto-threshold-btn after 3.5s yields threshold-readout=161 (vs the user-reported buggy 76; spec ≥100, ideal 120–180 — well inside the ideal band). Toast 'Threshold set → 161' appears. Safety path (running=false) shows 'Start the mic or play a file first' and threshold remains 140. Layout: Decoded Stream is a child of the lg:col-span-8 left column (immediately under Waveform); no col-span-12 full-width section contains it. Bigger fonts confirmed: gain/pitch/threshold readouts=18px, wpm/unit=36px, preset A/B letter=24px. mic-start-btn h=48px (≥44). Preset save/recall + active highlight + clear-on-slider-touch regression works perfectly. Minor sizing deviations only — see below.",
+  "tested_scope": ["frontend"],
+  "backend_issues": {"critical": [], "minor": []},
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [
+      {"screen": "Right control panel", "issues": [
+        "Tab triggers (tab-mic / tab-file) inner element measures h=28px at 1920w. The parent TabsList is h-12 (48px) so the clickable cell hit-target is correct, but the TabsTrigger element itself is shorter than the spec's ≥44px. Visually adequate, but if strict ≥44 on the trigger is required, add 'h-full' to the TabsTrigger className.",
+        "preset-a-save-btn / preset-b-save-btn measure h=34px vs spec ≥36px (off by 2px). The 'py-2' padding gives ~34px total. Bump to 'py-2.5' or add 'h-9' to hit 36."
+      ]}
+    ]
+  },
+  "passed_checks": [
+    "MAIN BUG — Auto threshold on sos_long.wav: threshold-readout went from 140 → 161 after 3.5s wait, well above the ≥100 acceptance bar (user said 76 was 'totally not working'; 161 is within the ideal 120–180 band). Toast 'Threshold set → 161' shown. Otsu algorithm working as designed.",
+    "Auto threshold safety (running=false): error toast 'Start the mic or play a file first' shown, threshold-readout stays at 140.",
+    "Layout — Decoded Stream is descendant of lg:col-span-8 (with fft-canvas + wave-canvas). No col-span-12 ancestor contains it. Decoded rect.right=1255px <= 0.7·1920=1344px (correctly in left column).",
+    "FILE flow regression: file-input accepts sos_long.wav, file-play-btn triggers capture-status-badge='● LIVE', fft-canvas and wave-canvas render.",
+    "Preset A: save captures live pitch+threshold (preset-a-values='700Hz · 161' after auto-threshold run). After moving pitch slider to 650Hz, clicking preset-a-recall-btn restores pitch=700Hz, thr=161. Toast 'Recalled A: 700 Hz · thr 161'.",
+    "Active highlight: post-recall the recall button has the exact 'text-black bg-[#00FF66]' class tokens. Touching pitch-slider (ArrowRight) removes them — setActivePreset(null) works.",
+    "Sizes (computed @1920w): mic-start-btn h=48 (≥44 ✓), gain-readout=18px, pitch-readout=18px, threshold-readout=18px, wpm-readout=36px, unit-readout=36px, preset-A letter=24px — all meet spec.",
+    "Regressions present and rendered: copy-clipboard-btn, clear-btn, signal-status-badge, pitch-slider, threshold-slider, gain-slider, manual-unit-slider, decoded-text-output, capture-status-badge.",
+    "PARIS/SOS auto-unit poisoning protection regression intact: unit-readout=75 after running sos_long.wav (well within 30–200)."
+  ],
+  "test_report_links": ["/app/frontend/public/sos_long.wav"],
+  "action_items": [
+    "(Minor / optional) Bump tab triggers height — add 'h-full' to TabsTrigger className OR set TabsList children to inherit h-12 — so the inner trigger element itself measures ≥44px (currently 28px while parent TabsList is 48px).",
+    "(Minor / optional) preset-a-save-btn / preset-b-save-btn are 34px tall; add 'h-9' or change 'py-2' to 'py-2.5' to reach the ≥36px spec."
+  ],
+  "critical_code_review_comments": [
+    "MorseDecoder.jsx is 1055 lines — approaching the 'split into smaller modules' guideline. Consider extracting (a) the auto-tune logic (autoTunePitch + autoTuneThreshold + Otsu), (b) the render-loop / detector, and (c) the morse decoder state machine into their own hooks/files. Non-blocking but file-size discipline matters as features grow.",
+    "Auto-threshold uses a fixed 3000ms calibration window. For UX, surface the remaining time in the 'Listening…' button label (e.g., 'Listening 2.4s') so the user knows when to key. Non-blocking.",
+    "TabsTrigger inner height (28px) being smaller than the parent TabsList (h-12=48px) is a shadcn quirk — the click target is still 48px due to the parent, but a11y/touch heuristics check the trigger element itself. Add 'h-full' to the className for strict spec compliance.",
+    "autoTuneThreshold useCallback dep list is [running] only — calibThrSamplesRef is mutated from inside the render loop. This is intentional & works (verified: 161 result), but a one-line comment would help future maintainers understand why state isn't in deps."
+  ],
+  "updated_files": [],
+  "seed_data_creation": "Reused /app/frontend/public/sos_long.wav (17s, 6× SOS at 700Hz) from iteration_7.",
+  "success_rate": {"backend": "N/A (no backend)", "frontend": "Main bug fix: 100% PASS. Layout: 100% PASS. Fonts: 100% PASS. Button sizes: 9/11 strict pass (mic-start ✓, presetARecall ✓, presetA-letter ✓, all readouts ✓; tab-mic/tab-file inner element + preset save buttons 2–16px under spec — minor visual)."},
+  "test_credentials": "none required",
+  "retest_needed": false,
+  "should_main_agent_self_test": true,
+  "context_for_next_testing_agent": "Iteration_8 confirmed the auto-threshold Otsu fix (76→161 for sos_long.wav). For future testing: (1) Wait ≥3.2s after clicking auto-threshold-btn (calibration window extended from 2s to 3s in this iteration). (2) Use /app/frontend/public/sos_long.wav as the canonical auto-tune test asset. (3) Two minor sizing deviations remain but are not user-impacting — TabsTrigger inner h=28px (parent TabsList is 48px so click area is fine) and preset save buttons h=34px vs spec 36px. (4) The new error toasts to look for: 'Signal too flat — key while calibrating' (maxV-minV<30) and 'Couldn't separate signal from noise — try again' (signalMean-noiseMean<20) — not triggered during this run because sos_long has clean bimodal distribution.",
+  "rca_of_the_issue": "Auto-threshold previously used p20 + 0.4*(p98-p20) which under-weighted the signal side when the keying duty cycle was low (more 'off' samples than 'on'), yielding ~76. The new Otsu's bimodal split correctly identifies the noise and signal class means independently of sample-count imbalance, then biases 65% toward the signal mean — producing 161 for sos_long.wav, firmly inside the 120–180 ideal band. Verified end-to-end via UI."
+}
