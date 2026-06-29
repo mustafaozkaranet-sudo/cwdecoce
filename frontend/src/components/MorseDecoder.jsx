@@ -15,6 +15,12 @@ import {
   Play,
   Pause,
   Square,
+  Sliders,
+  Target,
+  Gauge,
+  Save,
+  Volume2,
+  Bookmark,
 } from "lucide-react";
 import { decodeMorseSymbol } from "@/lib/morse";
 
@@ -35,12 +41,18 @@ export default function MorseDecoder() {
   const [currentSymbol, setCurrentSymbol] = useState("");
   const [audioFileName, setAudioFileName] = useState("");
   const [filePlaying, setFilePlaying] = useState(false);
+  const [gain, setGain] = useState(1.0);
+  const [calibrating, setCalibrating] = useState(null); // null | 'pitch' | 'threshold'
+  const [presetA, setPresetA] = useState({ pitch: 700, threshold: 140 });
+  const [presetB, setPresetB] = useState({ pitch: 600, threshold: 120 });
+  const [activePreset, setActivePreset] = useState(null); // 'A' | 'B' | null
 
   // Refs that need not retrigger renders
   const audioCtxRef = useRef(null);
   const analyserRef = useRef(null); // raw broadband analyser (for FFT/wave display)
   const detectorRef = useRef(null); // post-filter analyser (for tone detection)
   const filterRef = useRef(null); // BiquadFilterNode (bandpass)
+  const gainRef = useRef(null); // GainNode (input level)
   const micStreamRef = useRef(null);
   const micSourceRef = useRef(null);
   const fileSourceRef = useRef(null); // AudioBufferSourceNode
@@ -69,6 +81,19 @@ export default function MorseDecoder() {
   const thresholdRef = useRef(threshold);
   const unitRef = useRef(unitMs);
   const autoUnitRef = useRef(autoUnit);
+  const gainValRef = useRef(gain);
+  // Calibration buffers
+  const calibPitchSamplesRef = useRef(null); // { freqAccum: Float32Array, frames: 0 }
+  const calibThrSamplesRef = useRef(null); // number[] of detector peaks
+
+  useEffect(() => {
+    gainValRef.current = gain;
+    if (gainRef.current && audioCtxRef.current) {
+      try {
+        gainRef.current.gain.setTargetAtTime(gain, audioCtxRef.current.currentTime, 0.02);
+      } catch (e) { /* ignore */ }
+    }
+  }, [gain]);
 
   useEffect(() => {
     pitchRef.current = pitch;
@@ -111,6 +136,13 @@ export default function MorseDecoder() {
       filterRef.current = f;
     } else {
       filterRef.current.frequency.value = pitchRef.current;
+    }
+    if (!gainRef.current) {
+      const g = audioCtxRef.current.createGain();
+      g.gain.value = gainValRef.current;
+      g.connect(analyserRef.current);
+      g.connect(filterRef.current);
+      gainRef.current = g;
     }
     return audioCtxRef.current;
   }, []);
@@ -231,6 +263,16 @@ export default function MorseDecoder() {
       }
       const level = peak;
       setSignalLevel(level);
+
+      // Calibration samplers
+      if (calibPitchSamplesRef.current) {
+        const buf = calibPitchSamplesRef.current;
+        for (let i = 0; i < bufLen; i++) buf.freqAccum[i] += freqData[i];
+        buf.frames += 1;
+      }
+      if (calibThrSamplesRef.current) {
+        calibThrSamplesRef.current.push(level);
+      }
 
       const thr = thresholdRef.current;
       // Schmitt-trigger hysteresis: widen the on/off thresholds.
@@ -373,8 +415,7 @@ export default function MorseDecoder() {
       });
       micStreamRef.current = stream;
       const src = audioCtxRef.current.createMediaStreamSource(stream);
-      src.connect(analyserRef.current);
-      src.connect(filterRef.current);
+      src.connect(gainRef.current);
       micSourceRef.current = src;
       setRunning(true);
       stateRef.current = {
@@ -442,8 +483,7 @@ export default function MorseDecoder() {
     }
     const src = audioCtxRef.current.createBufferSource();
     src.buffer = audioBufferRef.current;
-    src.connect(analyserRef.current);
-    src.connect(filterRef.current);
+    src.connect(gainRef.current);
     src.connect(audioCtxRef.current.destination);
     src.onended = () => {
       filePlayingRef.current = false;
@@ -505,6 +545,93 @@ export default function MorseDecoder() {
     };
   }, []);
 
+  // ----- Auto target pitch -----
+  const autoTunePitch = useCallback(() => {
+    if (!running) {
+      toast.error("Start the mic or play a file first");
+      return;
+    }
+    const analyser = analyserRef.current;
+    const ctx = audioCtxRef.current;
+    if (!analyser || !ctx) return;
+    const bufLen = analyser.frequencyBinCount;
+    calibPitchSamplesRef.current = { freqAccum: new Float32Array(bufLen), frames: 0 };
+    setCalibrating("pitch");
+    toast.info("Calibrating target pitch… keep keying");
+    setTimeout(() => {
+      const buf = calibPitchSamplesRef.current;
+      calibPitchSamplesRef.current = null;
+      setCalibrating(null);
+      if (!buf || buf.frames < 5) {
+        toast.error("Not enough signal — try again");
+        return;
+      }
+      const sr = ctx.sampleRate;
+      // Search 250-1500 Hz for the peak average bin
+      const lo = Math.floor((250 / (sr / 2)) * bufLen);
+      const hi = Math.min(bufLen - 1, Math.ceil((1500 / (sr / 2)) * bufLen));
+      let bestBin = lo;
+      let bestVal = -1;
+      for (let i = lo; i <= hi; i++) {
+        if (buf.freqAccum[i] > bestVal) { bestVal = buf.freqAccum[i]; bestBin = i; }
+      }
+      const peakHz = Math.round((bestBin / bufLen) * (sr / 2));
+      const clamped = Math.max(200, Math.min(1500, peakHz));
+      setPitch(clamped);
+      setActivePreset(null);
+      toast.success(`Pitch locked → ${clamped} Hz`);
+    }, 1500);
+  }, [running]);
+
+  // ----- Auto threshold -----
+  const autoTuneThreshold = useCallback(() => {
+    if (!running) {
+      toast.error("Start the mic or play a file first");
+      return;
+    }
+    calibThrSamplesRef.current = [];
+    setCalibrating("threshold");
+    toast.info("Calibrating threshold… key a few dits/dahs");
+    setTimeout(() => {
+      const samples = calibThrSamplesRef.current || [];
+      calibThrSamplesRef.current = null;
+      setCalibrating(null);
+      if (samples.length < 20) {
+        toast.error("Not enough samples — try again");
+        return;
+      }
+      const sorted = [...samples].sort((a, b) => a - b);
+      const p20 = sorted[Math.floor(sorted.length * 0.2)];
+      const p90 = sorted[Math.floor(sorted.length * 0.9)];
+      const span = p90 - p20;
+      if (span < 25) {
+        toast.error("Signal too weak / no keying detected");
+        return;
+      }
+      const newThr = Math.round(p20 + span * 0.4);
+      const clamped = Math.max(20, Math.min(250, newThr));
+      setThreshold(clamped);
+      setActivePreset(null);
+      toast.success(`Threshold set → ${clamped}`);
+    }, 2000);
+  }, [running]);
+
+  // ----- Presets A/B -----
+  const recallPreset = useCallback((key) => {
+    const p = key === "A" ? presetA : presetB;
+    setPitch(p.pitch);
+    setThreshold(p.threshold);
+    setActivePreset(key);
+    toast.success(`Recalled ${key}: ${p.pitch} Hz · thr ${p.threshold}`);
+  }, [presetA, presetB]);
+
+  const savePreset = useCallback((key) => {
+    const snapshot = { pitch, threshold };
+    if (key === "A") setPresetA(snapshot); else setPresetB(snapshot);
+    setActivePreset(key);
+    toast.success(`Saved → ${key}`);
+  }, [pitch, threshold]);
+
   useEffect(() => () => stopAll(), [stopAll]);
 
   // Resize canvases to their containers (devicePixelRatio aware)
@@ -534,10 +661,10 @@ export default function MorseDecoder() {
         <div className="flex items-center gap-3">
           <Radio className="h-5 w-5 text-[#00FF66]" />
           <div className="flex items-baseline gap-3">
-            <span className="font-[JetBrains_Mono,monospace] text-lg font-bold tracking-tight">
+            <span className="font-[JetBrains_Mono,monospace] text-xl font-bold tracking-tight">
               TA3EDU
             </span>
-            <span className="text-[10px] tracking-[0.3em] uppercase text-[#80B399]">
+            <span className="text-xs tracking-[0.3em] uppercase text-[#80B399]">
               Morse Decoder // Web Audio
             </span>
           </div>
@@ -545,13 +672,13 @@ export default function MorseDecoder() {
         <div className="flex items-center gap-2">
           <Badge
             data-testid="signal-status-badge"
-            className={`rounded-none border ${signalOn ? "bg-[#FFB000] text-black border-[#FFB000]" : "bg-transparent text-[#80B399] border-[#1A3324]"} font-[JetBrains_Mono,monospace] text-[10px] tracking-[0.2em] uppercase px-2`}
+            className={`rounded-none border ${signalOn ? "bg-[#FFB000] text-black border-[#FFB000]" : "bg-transparent text-[#80B399] border-[#1A3324]"} font-[JetBrains_Mono,monospace] text-xs tracking-[0.2em] uppercase px-2`}
           >
             {signalOn ? "● TONE LOCK" : "○ NO LOCK"}
           </Badge>
           <Badge
             data-testid="capture-status-badge"
-            className={`rounded-none border ${running ? "bg-[#00FF66] text-black border-[#00FF66]" : "bg-transparent text-[#80B399] border-[#1A3324]"} font-[JetBrains_Mono,monospace] text-[10px] tracking-[0.2em] uppercase px-2`}
+            className={`rounded-none border ${running ? "bg-[#00FF66] text-black border-[#00FF66]" : "bg-transparent text-[#80B399] border-[#1A3324]"} font-[JetBrains_Mono,monospace] text-xs tracking-[0.2em] uppercase px-2`}
           >
             {running ? "● LIVE" : "○ IDLE"}
           </Badge>
@@ -564,29 +691,29 @@ export default function MorseDecoder() {
         <div className="col-span-1 lg:col-span-8 flex flex-col gap-2">
           {/* FFT */}
           <div className="border border-[#1A3324] bg-black relative">
-            <div className="absolute top-2 left-3 z-10 text-[10px] tracking-[0.3em] uppercase text-[#80B399] flex items-center gap-2">
+            <div className="absolute top-2 left-3 z-10 text-xs tracking-[0.3em] uppercase text-[#80B399] flex items-center gap-2">
               <Activity className="h-3 w-3" /> FFT Spectrum
             </div>
-            <div className="absolute top-2 right-3 z-10 font-[JetBrains_Mono,monospace] text-[10px] text-[#FFB000] tracking-widest">
+            <div className="absolute top-2 right-3 z-10 font-[JetBrains_Mono,monospace] text-xs text-[#FFB000] tracking-widest">
               {Math.round(signalLevel)} / 255
             </div>
             <canvas
               ref={fftCanvasRef}
               data-testid="fft-canvas"
-              className="w-full h-[220px] md:h-[260px] block"
+              className="w-full h-[165px] md:h-[195px] block"
             />
             <div className="pointer-events-none absolute inset-0 scanlines" />
           </div>
 
           {/* Waveform */}
           <div className="border border-[#1A3324] bg-black relative">
-            <div className="absolute top-2 left-3 z-10 text-[10px] tracking-[0.3em] uppercase text-[#80B399] flex items-center gap-2">
+            <div className="absolute top-2 left-3 z-10 text-xs tracking-[0.3em] uppercase text-[#80B399] flex items-center gap-2">
               <Activity className="h-3 w-3" /> Waveform
             </div>
             <canvas
               ref={waveCanvasRef}
               data-testid="wave-canvas"
-              className="w-full h-[140px] md:h-[180px] block"
+              className="w-full h-[105px] md:h-[135px] block"
             />
             <div className="pointer-events-none absolute inset-0 scanlines" />
           </div>
@@ -595,18 +722,18 @@ export default function MorseDecoder() {
         {/* Controls */}
         <aside className="col-span-1 lg:col-span-4 border border-[#1A3324] bg-[#0A0A0A] p-4 flex flex-col gap-5">
           <Tabs value={source} onValueChange={(v) => { stopAll(); setSource(v); }} className="w-full">
-            <TabsList className="w-full grid grid-cols-2 rounded-none bg-[#050505] p-0 h-9 border border-[#1A3324]">
+            <TabsList className="w-full grid grid-cols-2 rounded-none bg-[#050505] p-0 h-10 border border-[#1A3324]">
               <TabsTrigger
                 value="mic"
                 data-testid="tab-mic"
-                className="rounded-none data-[state=active]:bg-[#00FF66] data-[state=active]:text-black text-[#80B399] font-[JetBrains_Mono,monospace] tracking-[0.2em] uppercase text-[10px]"
+                className="rounded-none data-[state=active]:bg-[#00FF66] data-[state=active]:text-black text-[#80B399] font-[JetBrains_Mono,monospace] tracking-[0.2em] uppercase text-xs"
               >
                 <Mic className="h-3 w-3 mr-1" /> Mic
               </TabsTrigger>
               <TabsTrigger
                 value="file"
                 data-testid="tab-file"
-                className="rounded-none data-[state=active]:bg-[#00FF66] data-[state=active]:text-black text-[#80B399] font-[JetBrains_Mono,monospace] tracking-[0.2em] uppercase text-[10px]"
+                className="rounded-none data-[state=active]:bg-[#00FF66] data-[state=active]:text-black text-[#80B399] font-[JetBrains_Mono,monospace] tracking-[0.2em] uppercase text-xs"
               >
                 <Upload className="h-3 w-3 mr-1" /> File
               </TabsTrigger>
@@ -678,15 +805,79 @@ export default function MorseDecoder() {
             </TabsContent>
           </Tabs>
 
+          {/* Gain */}
+          <div>
+            <div className="flex items-baseline justify-between mb-2">
+              <label className="text-xs tracking-[0.3em] uppercase text-[#80B399] flex items-center gap-2">
+                <Volume2 className="h-3 w-3" /> Input Gain
+              </label>
+              <span data-testid="gain-readout" className="font-[JetBrains_Mono,monospace] text-[#00FF66] text-base">
+                {gain.toFixed(2)}×
+              </span>
+            </div>
+            <Slider
+              data-testid="gain-slider"
+              min={0}
+              max={5}
+              step={0.05}
+              value={[gain]}
+              onValueChange={([v]) => setGain(v)}
+              className="[&_[role=slider]]:rounded-none [&_[role=slider]]:bg-[#00FF66] [&_[role=slider]]:border-[#00FF66] [&_[role=slider]]:h-4 [&_[role=slider]]:w-3 [&>span:first-child]:bg-[#1A3324] [&>span:first-child>span]:bg-[#00FF66]"
+            />
+          </div>
+
+          {/* Presets A/B */}
+          <div>
+            <div className="text-xs tracking-[0.3em] uppercase text-[#80B399] mb-2 flex items-center gap-2">
+              <Bookmark className="h-3 w-3" /> Presets
+            </div>
+            <div className="grid grid-cols-2 gap-2">
+              {[
+                { key: "A", data: presetA },
+                { key: "B", data: presetB },
+              ].map(({ key, data }) => (
+                <div key={key} className={`border ${activePreset === key ? "border-[#00FF66]" : "border-[#1A3324]"} p-2 flex flex-col gap-2`}>
+                  <button
+                    data-testid={`preset-${key.toLowerCase()}-recall-btn`}
+                    onClick={() => recallPreset(key)}
+                    className={`flex items-center justify-between font-[JetBrains_Mono,monospace] text-base tracking-wider px-1 py-1 ${activePreset === key ? "text-black bg-[#00FF66]" : "text-[#00FF66] hover:text-black hover:bg-[#00FF66]"} transition-colors`}
+                  >
+                    <span className="font-bold">{key}</span>
+                    <span className="text-xs opacity-80" data-testid={`preset-${key.toLowerCase()}-values`}>
+                      {data.pitch}Hz · {data.threshold}
+                    </span>
+                  </button>
+                  <button
+                    data-testid={`preset-${key.toLowerCase()}-save-btn`}
+                    onClick={() => savePreset(key)}
+                    className="flex items-center justify-center gap-1 text-[10px] tracking-[0.25em] uppercase text-[#FFB000] border border-[#332300] hover:border-[#FFB000] hover:bg-[#FFB000] hover:text-black transition-colors py-1"
+                  >
+                    <Save className="h-3 w-3" /> Save
+                  </button>
+                </div>
+              ))}
+            </div>
+          </div>
+
           {/* Pitch */}
           <div>
             <div className="flex items-baseline justify-between mb-2">
-              <label className="text-[10px] tracking-[0.3em] uppercase text-[#80B399]">
-                Target Pitch
+              <label className="text-xs tracking-[0.3em] uppercase text-[#80B399] flex items-center gap-2">
+                <Target className="h-3 w-3" /> Target Pitch
               </label>
-              <span data-testid="pitch-readout" className="font-[JetBrains_Mono,monospace] text-[#00FF66] text-sm">
-                {pitch} Hz
-              </span>
+              <div className="flex items-center gap-2">
+                <button
+                  data-testid="auto-pitch-btn"
+                  onClick={autoTunePitch}
+                  disabled={calibrating !== null}
+                  className={`text-[10px] tracking-[0.25em] uppercase border px-2 py-0.5 transition-colors ${calibrating === "pitch" ? "border-[#FFB000] text-[#FFB000] animate-pulse" : "border-[#1A3324] text-[#80B399] hover:border-[#00FF66] hover:text-[#00FF66]"} disabled:opacity-40`}
+                >
+                  {calibrating === "pitch" ? "Listening…" : "Auto"}
+                </button>
+                <span data-testid="pitch-readout" className="font-[JetBrains_Mono,monospace] text-[#00FF66] text-base">
+                  {pitch} Hz
+                </span>
+              </div>
             </div>
             <Slider
               data-testid="pitch-slider"
@@ -694,7 +885,7 @@ export default function MorseDecoder() {
               max={1500}
               step={10}
               value={[pitch]}
-              onValueChange={([v]) => setPitch(v)}
+              onValueChange={([v]) => { setPitch(v); setActivePreset(null); }}
               className="[&_[role=slider]]:rounded-none [&_[role=slider]]:bg-[#00FF66] [&_[role=slider]]:border-[#00FF66] [&_[role=slider]]:h-4 [&_[role=slider]]:w-3 [&>span:first-child]:bg-[#1A3324] [&>span:first-child>span]:bg-[#00FF66]"
             />
           </div>
@@ -702,12 +893,22 @@ export default function MorseDecoder() {
           {/* Threshold */}
           <div>
             <div className="flex items-baseline justify-between mb-2">
-              <label className="text-[10px] tracking-[0.3em] uppercase text-[#80B399]">
-                Threshold
+              <label className="text-xs tracking-[0.3em] uppercase text-[#80B399] flex items-center gap-2">
+                <Gauge className="h-3 w-3" /> Threshold
               </label>
-              <span data-testid="threshold-readout" className="font-[JetBrains_Mono,monospace] text-[#FFB000] text-sm">
-                {threshold}
-              </span>
+              <div className="flex items-center gap-2">
+                <button
+                  data-testid="auto-threshold-btn"
+                  onClick={autoTuneThreshold}
+                  disabled={calibrating !== null}
+                  className={`text-[10px] tracking-[0.25em] uppercase border px-2 py-0.5 transition-colors ${calibrating === "threshold" ? "border-[#FFB000] text-[#FFB000] animate-pulse" : "border-[#1A3324] text-[#80B399] hover:border-[#FFB000] hover:text-[#FFB000]"} disabled:opacity-40`}
+                >
+                  {calibrating === "threshold" ? "Listening…" : "Auto"}
+                </button>
+                <span data-testid="threshold-readout" className="font-[JetBrains_Mono,monospace] text-[#FFB000] text-base">
+                  {threshold}
+                </span>
+              </div>
             </div>
             <Slider
               data-testid="threshold-slider"
@@ -715,7 +916,7 @@ export default function MorseDecoder() {
               max={250}
               step={1}
               value={[threshold]}
-              onValueChange={([v]) => setThreshold(v)}
+              onValueChange={([v]) => { setThreshold(v); setActivePreset(null); }}
               className="[&_[role=slider]]:rounded-none [&_[role=slider]]:bg-[#FFB000] [&_[role=slider]]:border-[#FFB000] [&_[role=slider]]:h-4 [&_[role=slider]]:w-3 [&>span:first-child]:bg-[#1A3324] [&>span:first-child>span]:bg-[#FFB000]"
             />
             <div className="mt-1 h-1 bg-[#1A3324] relative">
@@ -737,20 +938,20 @@ export default function MorseDecoder() {
           {/* Unit / WPM */}
           <div className="grid grid-cols-2 gap-2 pt-1">
             <div className="border border-[#1A3324] p-2">
-              <div className="text-[9px] tracking-[0.25em] uppercase text-[#80B399]">WPM</div>
-              <div data-testid="wpm-readout" className="font-[JetBrains_Mono,monospace] text-2xl text-[#FFB000] tracking-wider">
+              <div className="text-[10px] tracking-[0.25em] uppercase text-[#80B399]">WPM</div>
+              <div data-testid="wpm-readout" className="font-[JetBrains_Mono,monospace] text-3xl text-[#FFB000] tracking-wider">
                 {wpm || "—"}
               </div>
             </div>
             <div className="border border-[#1A3324] p-2">
-              <div className="text-[9px] tracking-[0.25em] uppercase text-[#80B399]">Unit (ms)</div>
-              <div data-testid="unit-readout" className="font-[JetBrains_Mono,monospace] text-2xl text-[#00FF66] tracking-wider">
+              <div className="text-[10px] tracking-[0.25em] uppercase text-[#80B399]">Unit (ms)</div>
+              <div data-testid="unit-readout" className="font-[JetBrains_Mono,monospace] text-3xl text-[#00FF66] tracking-wider">
                 {unitMs}
               </div>
             </div>
           </div>
 
-          <div className="flex items-center justify-between text-[10px] tracking-[0.25em] uppercase text-[#80B399]">
+          <div className="flex items-center justify-between text-xs tracking-[0.25em] uppercase text-[#80B399]">
             <button
               data-testid="auto-unit-toggle"
               onClick={() => setAutoUnit((v) => !v)}
@@ -775,10 +976,10 @@ export default function MorseDecoder() {
         <section className="col-span-1 lg:col-span-12 border border-[#1A3324] bg-[#0A0A0A] p-4">
           <div className="flex items-center justify-between mb-3">
             <div className="flex items-center gap-3">
-              <span className="text-[10px] tracking-[0.3em] uppercase text-[#80B399]">
+              <span className="text-xs tracking-[0.3em] uppercase text-[#80B399]">
                 Decoded Stream
               </span>
-              <span className="font-[JetBrains_Mono,monospace] text-[#FFB000] text-xs" data-testid="current-symbol">
+              <span className="font-[JetBrains_Mono,monospace] text-[#FFB000] text-sm" data-testid="current-symbol">
                 {currentSymbol || "·"}
               </span>
             </div>
@@ -786,14 +987,14 @@ export default function MorseDecoder() {
               <Button
                 data-testid="copy-clipboard-btn"
                 onClick={copyDecoded}
-                className="rounded-none bg-transparent border border-[#1A3324] text-[#00FF66] hover:bg-[#00FF66] hover:text-black h-8 px-3 font-[JetBrains_Mono,monospace] tracking-[0.2em] uppercase text-[10px]"
+                className="rounded-none bg-transparent border border-[#1A3324] text-[#00FF66] hover:bg-[#00FF66] hover:text-black h-9 px-3 font-[JetBrains_Mono,monospace] tracking-[0.2em] uppercase text-xs"
               >
                 <Copy className="h-3 w-3 mr-1" /> Copy
               </Button>
               <Button
                 data-testid="clear-btn"
                 onClick={clearAll}
-                className="rounded-none bg-transparent border border-[#1A3324] text-[#FFB000] hover:bg-[#FFB000] hover:text-black h-8 px-3 font-[JetBrains_Mono,monospace] tracking-[0.2em] uppercase text-[10px]"
+                className="rounded-none bg-transparent border border-[#1A3324] text-[#FFB000] hover:bg-[#FFB000] hover:text-black h-9 px-3 font-[JetBrains_Mono,monospace] tracking-[0.2em] uppercase text-xs"
               >
                 <Trash2 className="h-3 w-3 mr-1" /> Clear
               </Button>
@@ -801,19 +1002,19 @@ export default function MorseDecoder() {
           </div>
           <div
             data-testid="decoded-text-output"
-            className="font-[JetBrains_Mono,monospace] text-lg md:text-2xl text-[#00FF66] tracking-[0.15em] min-h-[80px] bg-black border border-[#1A3324] p-4 whitespace-pre-wrap break-words"
+            className="font-[JetBrains_Mono,monospace] text-xl md:text-3xl text-[#00FF66] tracking-[0.15em] min-h-[90px] bg-black border border-[#1A3324] p-4 whitespace-pre-wrap break-words"
             style={{ textShadow: "0 0 6px rgba(0,255,102,0.55)" }}
           >
             {decoded}
-            <span className="inline-block w-2 h-5 align-middle ml-1 bg-[#00FF66] animate-pulse" />
+            <span className="inline-block w-2 h-6 align-middle ml-1 bg-[#00FF66] animate-pulse" />
           </div>
-          <div className="mt-2 text-[10px] tracking-[0.25em] uppercase text-[#334D40]">
+          <div className="mt-2 text-xs tracking-[0.25em] uppercase text-[#334D40]">
             Intra-symbol gaps are ignored. Pause &gt; 3× unit = letter. Pause &gt; 7× unit = word.
           </div>
         </section>
       </div>
 
-      <footer className="px-4 md:px-6 py-3 text-[10px] tracking-[0.3em] uppercase text-[#334D40] border-t border-[#1A3324]">
+      <footer className="px-4 md:px-6 py-3 text-xs tracking-[0.3em] uppercase text-[#334D40] border-t border-[#1A3324]">
         TA3EDU // Web Audio API · AnalyserNode · FFT {FFT_SIZE}
       </footer>
     </div>
