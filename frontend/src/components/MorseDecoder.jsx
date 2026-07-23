@@ -887,8 +887,11 @@ export default function MorseDecoder() {
             <span className="font-[JetBrains_Mono,monospace] text-xl font-bold tracking-tight">
               TA3EDU
             </span>
-            <span className="text-xs tracking-[0.3em] uppercase text-[#80B399]">
+            <span className="text-xs tracking-[0.3em] uppercase text-[#80B399] hidden sm:inline">
               Morse Decoder // Web Audio
+            </span>
+            <span className="text-[10px] tracking-[0.2em] uppercase text-[#80B399] sm:hidden">
+              Morse Decoder
             </span>
           </div>
         </div>
@@ -908,83 +911,11 @@ export default function MorseDecoder() {
         </div>
       </header>
 
-      {/* Main grid */}
-      <div className="grid grid-cols-1 lg:grid-cols-12 gap-2 p-2 md:p-4">
-        {/* Visualizers */}
-        <div className="col-span-1 lg:col-span-8 flex flex-col gap-2">
-          {/* FFT */}
-          <div className="border border-[#1A3324] bg-black relative">
-            <div className="absolute top-2 left-3 z-10 text-xs tracking-[0.3em] uppercase text-[#80B399] flex items-center gap-2">
-              <Activity className="h-3 w-3" /> FFT Spectrum
-            </div>
-            <div className="absolute top-2 right-3 z-10 font-[JetBrains_Mono,monospace] text-xs text-[#FFB000] tracking-widest">
-              {Math.round(signalLevel)} / 255
-            </div>
-            <canvas
-              ref={fftCanvasRef}
-              data-testid="fft-canvas"
-              className="w-full h-[165px] md:h-[195px] block"
-            />
-            <div className="pointer-events-none absolute inset-0 scanlines" />
-          </div>
+      {/* Emergent layout: mobile stack, desktop 8+4 grid rows */}
+      <div className="grid grid-cols-1 lg:grid-cols-12 gap-2 p-2 md:p-4 auto-rows-min">
 
-          {/* Waveform */}
-          <div className="border border-[#1A3324] bg-black relative">
-            <div className="absolute top-2 left-3 z-10 text-xs tracking-[0.3em] uppercase text-[#80B399] flex items-center gap-2">
-              <Activity className="h-3 w-3" /> Waveform
-            </div>
-            <canvas
-              ref={waveCanvasRef}
-              data-testid="wave-canvas"
-              className="w-full h-[105px] md:h-[135px] block"
-            />
-            <div className="pointer-events-none absolute inset-0 scanlines" />
-          </div>
-
-          {/* Decoded stream — directly under waveform */}
-          <section className="border border-[#1A3324] bg-[#0A0A0A] p-4">
-            <div className="flex items-center justify-between mb-3">
-              <div className="flex items-center gap-3">
-                <span className="text-xs tracking-[0.3em] uppercase text-[#80B399]">
-                  Decoded Stream
-                </span>
-                <span className="font-[JetBrains_Mono,monospace] text-[#FFB000] text-sm" data-testid="current-symbol">
-                  {currentSymbol || "·"}
-                </span>
-              </div>
-              <div className="flex items-center gap-2">
-                <Button
-                  data-testid="copy-clipboard-btn"
-                  onClick={copyDecoded}
-                  className="rounded-none bg-transparent border border-[#1A3324] text-[#00FF66] hover:bg-[#00FF66] hover:text-black h-9 px-3 font-[JetBrains_Mono,monospace] tracking-[0.2em] uppercase text-xs"
-                >
-                  <Copy className="h-3 w-3 mr-1" /> Copy
-                </Button>
-                <Button
-                  data-testid="clear-btn"
-                  onClick={clearAll}
-                  className="rounded-none bg-transparent border border-[#1A3324] text-[#FFB000] hover:bg-[#FFB000] hover:text-black h-9 px-3 font-[JetBrains_Mono,monospace] tracking-[0.2em] uppercase text-xs"
-                >
-                  <Trash2 className="h-3 w-3 mr-1" /> Clear
-                </Button>
-              </div>
-            </div>
-            <div
-              data-testid="decoded-text-output"
-              className="font-[JetBrains_Mono,monospace] text-xl md:text-3xl text-[#00FF66] tracking-[0.15em] min-h-[120px] bg-black border border-[#1A3324] p-4 whitespace-pre-wrap break-words"
-              style={{ textShadow: "0 0 6px rgba(0,255,102,0.55)" }}
-            >
-              {decoded}
-              <span className="inline-block w-2 h-6 align-middle ml-1 bg-[#00FF66] animate-pulse" />
-            </div>
-            <div className="mt-2 text-xs tracking-[0.25em] uppercase text-[#334D40]">
-              Intra-symbol gaps are ignored. Pause &gt; 3× unit = letter. Pause &gt; 7× unit = word.
-            </div>
-          </section>
-        </div>
-
-        {/* Controls */}
-        <aside className="col-span-1 lg:col-span-4 border border-[#1A3324] bg-[#0A0A0A] p-5 flex flex-col gap-6">
+        {/* 1 · Capture (mobile first) */}
+        <section className="lg:col-span-4 lg:col-start-9 lg:row-start-1 border border-[#1A3324] bg-[#0A0A0A] p-4">
           <Tabs value={source} onValueChange={(v) => { stopAll(); setSource(v); }} className="w-full">
             <TabsList className="w-full grid grid-cols-2 rounded-none bg-[#050505] p-0 h-12 border border-[#1A3324]">
               <TabsTrigger
@@ -1068,33 +999,30 @@ export default function MorseDecoder() {
               </div>
             </TabsContent>
           </Tabs>
+        </section>
 
-          {/* Gain */}
-          <div>
-            <div className="flex items-baseline justify-between mb-2">
-              <label className="text-sm tracking-[0.3em] uppercase text-[#80B399] flex items-center gap-2">
-                <Volume2 className="h-4 w-4" /> Input Gain
-              </label>
-              <span data-testid="gain-readout" className="font-[JetBrains_Mono,monospace] text-[#00FF66] text-lg">
-                {gain.toFixed(2)}×
-              </span>
-            </div>
-            <Slider
-              data-testid="gain-slider"
-              min={0}
-              max={5}
-              step={0.05}
-              value={[gain]}
-              onValueChange={([v]) => setGain(v)}
-              className="[&_[role=slider]]:rounded-none [&_[role=slider]]:bg-[#00FF66] [&_[role=slider]]:border-[#00FF66] [&_[role=slider]]:h-5 [&_[role=slider]]:w-4 [&>span:first-child]:h-1.5 [&>span:first-child]:bg-[#1A3324] [&>span:first-child>span]:bg-[#00FF66]"
-            />
+        {/* 2 · FFT */}
+        <section className="lg:col-span-8 lg:col-start-1 lg:row-start-1 border border-[#1A3324] bg-black relative">
+          <div className="absolute top-2 left-3 z-10 text-xs tracking-[0.3em] uppercase text-[#80B399] flex items-center gap-2">
+            <Activity className="h-3 w-3" /> FFT Spectrum 0–3.5 KHZ
           </div>
+          <div className="absolute top-2 right-3 z-10 font-[JetBrains_Mono,monospace] text-xs text-[#FFB000] tracking-widest">
+            {Math.round(signalLevel)} / 255
+          </div>
+          <canvas
+            ref={fftCanvasRef}
+            data-testid="fft-canvas"
+            className="w-full h-[165px] md:h-[195px] block"
+          />
+          <div className="pointer-events-none absolute inset-0 scanlines" />
+        </section>
 
-          {/* Pitch */}
+        {/* 3 · Signal sliders (under FFT on desktop) */}
+        <section className="lg:col-span-8 lg:col-start-1 lg:row-start-2 border border-[#1A3324] bg-[#0A0A0A] p-4 flex flex-col gap-5">
           <div>
             <div className="flex items-baseline justify-between mb-2">
-              <label className="text-sm tracking-[0.3em] uppercase text-[#80B399] flex items-center gap-2">
-                <Target className="h-4 w-4" /> Target Pitch
+              <label className="text-xs tracking-[0.3em] uppercase text-[#80B399] flex items-center gap-2">
+                <Target className="h-3.5 w-3.5" /> Target Pitch
               </label>
               <div className="flex items-center gap-3">
                 <button
@@ -1121,11 +1049,10 @@ export default function MorseDecoder() {
             />
           </div>
 
-          {/* Threshold */}
           <div>
             <div className="flex items-baseline justify-between mb-2">
-              <label className="text-sm tracking-[0.3em] uppercase text-[#80B399] flex items-center gap-2">
-                <Gauge className="h-4 w-4" /> Threshold
+              <label className="text-xs tracking-[0.3em] uppercase text-[#80B399] flex items-center gap-2">
+                <Gauge className="h-3.5 w-3.5" /> Threshold
               </label>
               <div className="flex items-center gap-3">
                 <button
@@ -1166,78 +1093,154 @@ export default function MorseDecoder() {
             </div>
           </div>
 
-          {/* Presets + Speed & Timing */}
-          <div className="border border-[#1A3324] p-4 flex flex-col gap-4">
-            <div className="text-sm tracking-[0.3em] uppercase text-[#80B399] flex items-center gap-2">
-              <Bookmark className="h-4 w-4" /> Presets
+          <div>
+            <div className="flex items-baseline justify-between mb-2">
+              <label className="text-xs tracking-[0.3em] uppercase text-[#80B399] flex items-center gap-2">
+                <Volume2 className="h-3.5 w-3.5" /> Input Gain
+              </label>
+              <span data-testid="gain-readout" className="font-[JetBrains_Mono,monospace] text-[#00FF66] text-lg">
+                {gain.toFixed(2)}×
+              </span>
             </div>
-            <div className="grid grid-cols-2 gap-3">
-              {[
-                { key: "A", data: presetA },
-                { key: "B", data: presetB },
-              ].map(({ key, data }) => (
-                <div key={key} className={`border ${activePreset === key ? "border-[#00FF66]" : "border-[#1A3324]"} p-3 flex flex-col gap-2`}>
-                  <button
-                    data-testid={`preset-${key.toLowerCase()}-recall-btn`}
-                    onClick={() => recallPreset(key)}
-                    className={`flex items-center justify-between font-[JetBrains_Mono,monospace] tracking-wider px-2 py-2 ${activePreset === key ? "text-black bg-[#00FF66]" : "text-[#00FF66] hover:text-black hover:bg-[#00FF66]"} transition-colors`}
-                  >
-                    <span className="text-2xl font-bold">{key}</span>
-                    <span className="text-xs opacity-80 leading-tight text-right" data-testid={`preset-${key.toLowerCase()}-values`}>
-                      {data.pitch}Hz · {data.threshold}
-                    </span>
-                  </button>
-                  <button
-                    data-testid={`preset-${key.toLowerCase()}-save-btn`}
-                    onClick={() => savePreset(key)}
-                    className="flex items-center justify-center gap-2 text-xs tracking-[0.25em] uppercase text-[#FFB000] border border-[#332300] hover:border-[#FFB000] hover:bg-[#FFB000] hover:text-black transition-colors h-9"
-                  >
-                    <Save className="h-4 w-4" /> Save
-                  </button>
-                </div>
-              ))}
-            </div>
+            <Slider
+              data-testid="gain-slider"
+              min={0}
+              max={5}
+              step={0.05}
+              value={[gain]}
+              onValueChange={([v]) => setGain(v)}
+              className="[&_[role=slider]]:rounded-none [&_[role=slider]]:bg-[#00FF66] [&_[role=slider]]:border-[#00FF66] [&_[role=slider]]:h-5 [&_[role=slider]]:w-4 [&>span:first-child]:h-1.5 [&>span:first-child]:bg-[#1A3324] [&>span:first-child>span]:bg-[#00FF66]"
+            />
+          </div>
+        </section>
 
-            <div className="border-t border-[#1A3324] pt-4 flex flex-col gap-4">
-              <div className="text-xs tracking-[0.3em] uppercase text-[#80B399] flex items-center gap-2">
-                <Timer className="h-3.5 w-3.5" /> Speed &amp; Timing
-              </div>
-              <div className="grid grid-cols-2 gap-3">
-                <div className="border border-[#1A3324] p-3 bg-[#050505]">
-                  <div className="text-xs tracking-[0.25em] uppercase text-[#80B399]">WPM</div>
-                  <div data-testid="wpm-readout" className="font-[JetBrains_Mono,monospace] text-4xl text-[#FFB000] tracking-wider">
-                    {wpm || "—"}
-                  </div>
-                </div>
-                <div className="border border-[#1A3324] p-3 bg-[#050505]">
-                  <div className="text-xs tracking-[0.25em] uppercase text-[#80B399]">Unit (ms)</div>
-                  <div data-testid="unit-readout" className="font-[JetBrains_Mono,monospace] text-4xl text-[#00FF66] tracking-wider">
-                    {unitMs}
-                  </div>
-                </div>
-              </div>
-              <div className="flex items-center justify-between gap-3 text-xs tracking-[0.25em] uppercase text-[#80B399]">
+        {/* 4 · Decoded stream */}
+        <section className="lg:col-span-8 lg:col-start-1 lg:row-start-3 border border-[#1A3324] bg-[#0A0A0A] p-4">
+          <div className="flex items-center justify-between mb-3">
+            <div className="flex items-center gap-3">
+              <span className="text-xs tracking-[0.3em] uppercase text-[#80B399]">
+                Decoded Stream
+              </span>
+              <span className="font-[JetBrains_Mono,monospace] text-[#FFB000] text-sm" data-testid="current-symbol">
+                {currentSymbol || "·"}
+              </span>
+            </div>
+            <div className="flex items-center gap-2">
+              <Button
+                data-testid="copy-clipboard-btn"
+                onClick={copyDecoded}
+                className="rounded-none bg-transparent border border-[#1A3324] text-[#00FF66] hover:bg-[#00FF66] hover:text-black h-9 px-3 font-[JetBrains_Mono,monospace] tracking-[0.2em] uppercase text-xs"
+              >
+                <Copy className="h-3 w-3 mr-1" /> Copy
+              </Button>
+              <Button
+                data-testid="clear-btn"
+                onClick={clearAll}
+                className="rounded-none bg-transparent border border-[#1A3324] text-[#FFB000] hover:bg-[#FFB000] hover:text-black h-9 px-3 font-[JetBrains_Mono,monospace] tracking-[0.2em] uppercase text-xs"
+              >
+                <Trash2 className="h-3 w-3 mr-1" /> Clear
+              </Button>
+            </div>
+          </div>
+          <div
+            data-testid="decoded-text-output"
+            className="font-[JetBrains_Mono,monospace] text-xl md:text-3xl text-[#00FF66] tracking-[0.15em] min-h-[120px] bg-black border border-[#1A3324] p-4 whitespace-pre-wrap break-words"
+            style={{ textShadow: "0 0 6px rgba(0,255,102,0.55)" }}
+          >
+            {decoded}
+            <span className="inline-block w-2 h-6 align-middle ml-1 bg-[#00FF66] animate-pulse" />
+          </div>
+          <div className="mt-2 text-xs tracking-[0.25em] uppercase text-[#334D40]">
+            Intra-symbol gaps are ignored. Pause &gt; 3× unit = letter. Pause &gt; 7× unit = word.
+          </div>
+        </section>
+
+        {/* 5 · Waveform (right column on desktop) */}
+        <section className="lg:col-span-4 lg:col-start-9 lg:row-start-2 border border-[#1A3324] bg-black relative">
+          <div className="absolute top-2 left-3 z-10 text-xs tracking-[0.3em] uppercase text-[#80B399] flex items-center gap-2">
+            <Activity className="h-3 w-3" /> Waveform · Auto-Scale
+          </div>
+          <canvas
+            ref={waveCanvasRef}
+            data-testid="wave-canvas"
+            className="w-full h-[105px] md:h-[135px] block"
+          />
+          <div className="pointer-events-none absolute inset-0 scanlines" />
+        </section>
+
+        {/* 6 · Presets */}
+        <section className="lg:col-span-4 lg:col-start-9 lg:row-start-3 border border-[#1A3324] bg-[#0A0A0A] p-4 flex flex-col gap-4">
+          <div className="text-sm tracking-[0.3em] uppercase text-[#80B399] flex items-center gap-2">
+            <Bookmark className="h-4 w-4" /> Presets
+          </div>
+          <div className="grid grid-cols-2 gap-3">
+            {[
+              { key: "A", data: presetA },
+              { key: "B", data: presetB },
+            ].map(({ key, data }) => (
+              <div key={key} className={`border ${activePreset === key ? "border-[#00FF66]" : "border-[#1A3324]"} p-3 flex flex-col gap-2`}>
                 <button
-                  data-testid="auto-unit-toggle"
-                  onClick={() => setAutoUnit((v) => !v)}
-                  className={`px-3 py-2 h-9 border ${autoUnit ? "border-[#00FF66] text-[#00FF66]" : "border-[#1A3324] text-[#80B399]"} hover:border-[#00FF66] hover:text-[#00FF66] transition-colors whitespace-nowrap`}
+                  data-testid={`preset-${key.toLowerCase()}-recall-btn`}
+                  onClick={() => recallPreset(key)}
+                  className={`flex items-center justify-between font-[JetBrains_Mono,monospace] tracking-wider px-2 py-2 ${activePreset === key ? "text-black bg-[#00FF66]" : "text-[#00FF66] hover:text-black hover:bg-[#00FF66]"} transition-colors`}
                 >
-                  Auto unit: {autoUnit ? "ON" : "OFF"}
+                  <span className="text-2xl font-bold">{key}</span>
+                  <span className="text-xs opacity-80 leading-tight text-right" data-testid={`preset-${key.toLowerCase()}-values`}>
+                    {data.pitch}Hz · {data.threshold}
+                  </span>
                 </button>
-                <Slider
-                  data-testid="manual-unit-slider"
-                  min={30}
-                  max={300}
-                  step={5}
-                  value={[unitMs]}
-                  onValueChange={([v]) => { setUnitMs(v); setWpm(Math.round(1200 / v)); }}
-                  disabled={autoUnit}
-                  className="flex-1 [&_[role=slider]]:rounded-none [&_[role=slider]]:bg-[#00FF66] [&_[role=slider]]:border-[#00FF66] [&_[role=slider]]:h-4 [&_[role=slider]]:w-3 [&>span:first-child]:bg-[#1A3324] [&>span:first-child>span]:bg-[#00FF66] disabled:opacity-40"
-                />
+                <button
+                  data-testid={`preset-${key.toLowerCase()}-save-btn`}
+                  onClick={() => savePreset(key)}
+                  className="flex items-center justify-center gap-2 text-xs tracking-[0.25em] uppercase text-[#FFB000] border border-[#332300] hover:border-[#FFB000] hover:bg-[#FFB000] hover:text-black transition-colors h-9"
+                >
+                  <Save className="h-4 w-4" /> Save
+                </button>
+              </div>
+            ))}
+          </div>
+        </section>
+
+        {/* 7 · Speed & Timing */}
+        <section className="lg:col-span-4 lg:col-start-9 lg:row-start-4 border border-[#1A3324] bg-[#0A0A0A] p-4 flex flex-col gap-4">
+          <div className="text-xs tracking-[0.3em] uppercase text-[#80B399] flex items-center gap-2">
+            <Timer className="h-3.5 w-3.5" /> Speed &amp; Timing
+          </div>
+          <div className="grid grid-cols-2 gap-3">
+            <div className="border border-[#1A3324] p-3 bg-[#050505]">
+              <div className="text-xs tracking-[0.25em] uppercase text-[#80B399]">WPM</div>
+              <div data-testid="wpm-readout" className="font-[JetBrains_Mono,monospace] text-4xl text-[#FFB000] tracking-wider">
+                {wpm || "—"}
+              </div>
+            </div>
+            <div className="border border-[#1A3324] p-3 bg-[#050505]">
+              <div className="text-xs tracking-[0.25em] uppercase text-[#80B399]">Unit (ms)</div>
+              <div data-testid="unit-readout" className="font-[JetBrains_Mono,monospace] text-4xl text-[#00FF66] tracking-wider">
+                {unitMs}
               </div>
             </div>
           </div>
-        </aside>
+          <div className="flex items-center justify-between gap-3 text-xs tracking-[0.25em] uppercase text-[#80B399]">
+            <button
+              data-testid="auto-unit-toggle"
+              onClick={() => setAutoUnit((v) => !v)}
+              className={`px-3 py-2 h-9 border ${autoUnit ? "border-[#00FF66] text-[#00FF66]" : "border-[#1A3324] text-[#80B399]"} hover:border-[#00FF66] hover:text-[#00FF66] transition-colors whitespace-nowrap`}
+            >
+              Auto unit: {autoUnit ? "ON" : "OFF"}
+            </button>
+            <Slider
+              data-testid="manual-unit-slider"
+              min={30}
+              max={300}
+              step={5}
+              value={[unitMs]}
+              onValueChange={([v]) => { setUnitMs(v); setWpm(Math.round(1200 / v)); }}
+              disabled={autoUnit}
+              className="flex-1 [&_[role=slider]]:rounded-none [&_[role=slider]]:bg-[#00FF66] [&_[role=slider]]:border-[#00FF66] [&_[role=slider]]:h-4 [&_[role=slider]]:w-3 [&>span:first-child]:bg-[#1A3324] [&>span:first-child>span]:bg-[#00FF66] disabled:opacity-40"
+            />
+          </div>
+        </section>
+
       </div>
 
       <footer className="px-4 md:px-6 py-3 text-xs tracking-[0.3em] uppercase text-[#334D40] border-t border-[#1A3324]">
