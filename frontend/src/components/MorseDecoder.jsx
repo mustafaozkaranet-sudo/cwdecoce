@@ -430,26 +430,14 @@ export default function MorseDecoder() {
     return peak;
   }, []);
 
-  const edgeSecToSessionMs = useCallback((timeSec) => {
-    const session = sessionTimeRef.current;
-    return session.perfStart + (timeSec - session.audioStart) * 1000;
-  }, []);
-
   const handleWorkletMessage = useCallback((event) => {
     const msg = event.data;
-    if (!msg?.type || !runningRef.current) return;
-
-    if (msg.type === "edge") {
-      processEdge(msg.on, edgeSecToSessionMs(msg.timeSec));
-      return;
+    if (!msg?.type) return;
+    // Worklet scale sync only — decode edges always come from FFT (same scale as threshold UI).
+    if (msg.type === "level" && calibThrSamplesRef.current) {
+      calibThrSamplesRef.current.push(msg.level);
     }
-
-    if (msg.type === "level") {
-      if (calibThrSamplesRef.current) {
-        calibThrSamplesRef.current.push(msg.level);
-      }
-    }
-  }, [edgeSecToSessionMs, processEdge]);
+  }, []);
 
   const runDetectionTick = useCallback(() => {
     const level = readDetectorLevel();
@@ -463,36 +451,28 @@ export default function MorseDecoder() {
       workletNodeRef.current.port.postMessage({ type: "calibrate", fftLevel: level });
     }
 
-    const nowMs = getSessionNowMs();
+    const thr = thresholdRef.current;
     const st = stateRef.current;
+    const hyst = Math.max(3, thr * 0.03);
+    const rawOn = level >= NOISE_FLOOR && (st.isOn
+      ? level > thr - hyst
+      : level > thr + hyst);
 
-    if (!useWorkletRef.current) {
-      const thr = thresholdRef.current;
-      const hyst = Math.max(3, thr * 0.03);
-      const rawOn = level >= NOISE_FLOOR && (st.isOn
-        ? level > thr - hyst
-        : level > thr + hyst);
-
-      if (rawOn !== st.isOn) {
-        if (st.pendingState !== rawOn) {
-          st.pendingState = rawOn;
-          st.pendingSince = nowMs;
-        } else if (nowMs - st.pendingSince >= MIN_EDGE_MS) {
-          processEdge(rawOn, st.pendingSince);
-          st.pendingState = rawOn;
-        }
-      } else {
+    const nowMs = getSessionNowMs();
+    if (rawOn !== st.isOn) {
+      if (st.pendingState !== rawOn) {
+        st.pendingState = rawOn;
+        st.pendingSince = nowMs;
+      } else if (nowMs - st.pendingSince >= MIN_EDGE_MS) {
+        processEdge(rawOn, st.pendingSince);
         st.pendingState = rawOn;
       }
+    } else {
+      st.pendingState = rawOn;
+      checkTrailingTimeout(nowMs);
     }
 
-    checkTrailingTimeout(nowMs);
-
-    const thr = thresholdRef.current;
-    const uiOn = level >= NOISE_FLOOR && (st.isOn
-      ? level > thr - Math.max(3, thr * 0.03)
-      : level > thr + Math.max(3, thr * 0.03));
-    syncSignalUi(level, uiOn);
+    syncSignalUi(level, rawOn);
   }, [readDetectorLevel, processEdge, checkTrailingTimeout, syncSignalUi, getSessionNowMs]);
 
   const startDetectionLoop = useCallback(() => {
