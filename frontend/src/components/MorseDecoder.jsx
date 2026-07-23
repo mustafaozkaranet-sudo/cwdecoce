@@ -26,8 +26,6 @@ import { decodeMorseSymbol } from "@/lib/morse";
 
 const FFT_SIZE = 2048;
 const SMOOTHING = 0.8;
-const DETECTION_INTERVAL_MS = 8;
-const UI_TICK_MS = 30;
 const MIN_EDGE_MS = 8;
 const UI_SYNC_MS = 50;
 const NOISE_FLOOR = 25;
@@ -124,10 +122,10 @@ export default function MorseDecoder() {
   const fftCanvasRef = useRef(null);
   const waveCanvasRef = useRef(null);
   const rafRef = useRef(null);
-  const detectionIntervalRef = useRef(null);
   const detFreqDataBufRef = useRef(null);
   const lastUiSyncRef = useRef(0);
   const signalLevelRef = useRef(0);
+  const runningRef = useRef(false);
 
   // Morse state
   const stateRef = useRef(resetMorseState());
@@ -188,7 +186,7 @@ export default function MorseDecoder() {
     if (!detectorRef.current) {
       const d = audioCtxRef.current.createAnalyser();
       d.fftSize = 1024;
-      d.smoothingTimeConstant = 0.05;
+      d.smoothingTimeConstant = 0;
       detectorRef.current = d;
       detFreqDataBufRef.current = new Uint8Array(d.frequencyBinCount);
     }
@@ -218,11 +216,6 @@ export default function MorseDecoder() {
       perfStart: performance.now(),
       audioStart: ctx ? ctx.currentTime : 0,
     };
-  }, []);
-
-  const audioTimeToPerfMs = useCallback((timeSec) => {
-    const session = sessionTimeRef.current;
-    return session.perfStart + (timeSec - session.audioStart) * 1000;
   }, []);
 
   const loadWorkletModule = useCallback(async (ctx) => {
@@ -374,6 +367,15 @@ export default function MorseDecoder() {
     }
   }, [flushSymbol, addSpace]);
 
+  const getSessionNowMs = useCallback(() => {
+    const ctx = audioCtxRef.current;
+    const session = sessionTimeRef.current;
+    if (ctx && session.audioStart) {
+      return session.perfStart + (ctx.currentTime - session.audioStart) * 1000;
+    }
+    return performance.now();
+  }, []);
+
   const syncSignalUi = useCallback((level, rawOn) => {
     const nowMs = performance.now();
     if (nowMs - lastUiSyncRef.current < UI_SYNC_MS) return;
@@ -404,18 +406,11 @@ export default function MorseDecoder() {
   const handleWorkletMessage = useCallback((event) => {
     const msg = event.data;
     if (!msg?.type) return;
-
-    if (msg.type === "level") {
-      signalLevelRef.current = msg.level;
-      if (calibThrSamplesRef.current) calibThrSamplesRef.current.push(msg.level);
-      syncSignalUi(readDetectorLevel(), msg.isOn);
-      return;
+    // Worklet scale sync only — decode edges come from FFT (same scale as threshold UI).
+    if (msg.type === "level" && calibThrSamplesRef.current) {
+      calibThrSamplesRef.current.push(msg.level);
     }
-
-    if (msg.type === "edge") {
-      processEdge(msg.on, audioTimeToPerfMs(msg.timeSec));
-    }
-  }, [audioTimeToPerfMs, processEdge, syncSignalUi, readDetectorLevel]);
+  }, []);
 
   const runDetectionTick = useCallback(() => {
     const level = readDetectorLevel();
@@ -425,14 +420,8 @@ export default function MorseDecoder() {
       calibThrSamplesRef.current.push(level);
     }
 
-    // Worklet handles edges on the audio thread; FFT drives UI + scale sync.
-    if (useWorkletRef.current && workletNodeRef.current) {
-      if (level > NOISE_FLOOR + 10) {
-        workletNodeRef.current.port.postMessage({ type: "calibrate", fftLevel: level });
-      }
-      syncSignalUi(level, stateRef.current.isOn);
-      checkTrailingTimeout(performance.now());
-      return;
+    if (useWorkletRef.current && workletNodeRef.current && level > NOISE_FLOOR + 10) {
+      workletNodeRef.current.port.postMessage({ type: "calibrate", fftLevel: level });
     }
 
     const thr = thresholdRef.current;
@@ -443,7 +432,7 @@ export default function MorseDecoder() {
       ? level > thr - hystOff
       : level > thr + hystOn);
 
-    const nowMs = performance.now();
+    const nowMs = getSessionNowMs();
     if (rawOn !== st.isOn) {
       if (st.pendingState !== rawOn) {
         st.pendingState = rawOn;
@@ -458,26 +447,18 @@ export default function MorseDecoder() {
     }
 
     syncSignalUi(level, rawOn);
-  }, [readDetectorLevel, processEdge, checkTrailingTimeout, syncSignalUi]);
+  }, [readDetectorLevel, processEdge, checkTrailingTimeout, syncSignalUi, getSessionNowMs]);
 
   const startDetectionLoop = useCallback(() => {
-    if (detectionIntervalRef.current) return;
-    lastUiSyncRef.current = 0;
-
     if (useWorkletRef.current && workletNodeRef.current) {
       workletNodeRef.current.port.onmessage = handleWorkletMessage;
     }
-
+    lastUiSyncRef.current = 0;
     runDetectionTick();
-    const intervalMs = useWorkletRef.current ? UI_TICK_MS : DETECTION_INTERVAL_MS;
-    detectionIntervalRef.current = setInterval(runDetectionTick, intervalMs);
   }, [handleWorkletMessage, runDetectionTick]);
 
   const stopDetectionLoop = useCallback(() => {
-    if (detectionIntervalRef.current) {
-      clearInterval(detectionIntervalRef.current);
-      detectionIntervalRef.current = null;
-    }
+    // Detection runs inside renderLoop; nothing to stop here.
   }, []);
 
   const renderLoop = useCallback(() => {
@@ -494,6 +475,11 @@ export default function MorseDecoder() {
 
     const draw = () => {
       rafRef.current = requestAnimationFrame(draw);
+
+      if (runningRef.current) {
+        runDetectionTick();
+      }
+
       analyser.getByteFrequencyData(freqData);
       analyser.getByteTimeDomainData(timeData);
 
@@ -609,7 +595,7 @@ export default function MorseDecoder() {
       }
     };
     draw();
-  }, []);
+  }, [runDetectionTick]);
 
   const startMic = useCallback(async () => {
     try {
@@ -627,6 +613,7 @@ export default function MorseDecoder() {
       const src = audioCtxRef.current.createMediaStreamSource(stream);
       src.connect(gainRef.current);
       micSourceRef.current = src;
+      runningRef.current = true;
       setRunning(true);
       stateRef.current = resetMorseState();
       if (autoUnitRef.current) {
@@ -660,6 +647,7 @@ export default function MorseDecoder() {
     }
     filePlayingRef.current = false;
     setFilePlaying(false);
+    runningRef.current = false;
     setRunning(false);
     setSignalOn(false);
   }, [stopDetectionLoop]);
@@ -702,6 +690,7 @@ export default function MorseDecoder() {
     src.start();
     fileSourceRef.current = src;
     filePlayingRef.current = true;
+    runningRef.current = true;
     setFilePlaying(true);
     setRunning(true);
     stateRef.current = resetMorseState();
