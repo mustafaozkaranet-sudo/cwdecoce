@@ -26,6 +26,60 @@ import { decodeMorseSymbol } from "@/lib/morse";
 
 const FFT_SIZE = 2048;
 const SMOOTHING = 0.8;
+const DETECTION_INTERVAL_MS = 8;
+const MIN_EDGE_MS = 8;
+const UI_SYNC_MS = 50;
+const NOISE_FLOOR = 25;
+const UNIT_MIN_MS = 30;
+const UNIT_MAX_MS = 300;
+const DEFAULT_UNIT_MS = 80;
+
+function median(values) {
+  if (!values.length) return 0;
+  const sorted = [...values].sort((a, b) => a - b);
+  const mid = Math.floor(sorted.length / 2);
+  return sorted.length % 2 ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) / 2;
+}
+
+function samplesConsistent(values, tolerance = 0.4) {
+  if (values.length < 2) return false;
+  const med = median(values);
+  return values.every((v) => v >= med * (1 - tolerance) && v <= med * (1 + tolerance));
+}
+
+function isValidUnitSample(sampleUnit, unit) {
+  if (sampleUnit < 20) return false;
+  return sampleUnit >= unit / 2 && sampleUnit <= 2 * unit;
+}
+
+function applyUnitFromSamples(samples, setUnitMs, setWpm, unitRef) {
+  if (samples.length < 2) return;
+  const med = median(samples);
+  const inliers = samples.filter((v) => v >= med * 0.6 && v <= med * 1.4);
+  if (inliers.length < 2 || !samplesConsistent(inliers)) return;
+  const clamped = Math.max(UNIT_MIN_MS, Math.min(UNIT_MAX_MS, Math.round(median(inliers))));
+  if (Math.abs(clamped - unitRef.current) < 2) return;
+  setUnitMs(clamped);
+  unitRef.current = clamped;
+  setWpm(Math.round(1200 / clamped));
+}
+
+function resetMorseState() {
+  return {
+    isOn: false,
+    lastEdgeAt: 0,
+    currentSymbol: "",
+    dotDurations: [],
+    pendingState: false,
+    pendingSince: 0,
+  };
+}
+
+function resetAutoUnit(setUnitMs, setWpm, unitRef) {
+  setUnitMs(DEFAULT_UNIT_MS);
+  unitRef.current = DEFAULT_UNIT_MS;
+  setWpm(0);
+}
 
 export default function MorseDecoder() {
   const [running, setRunning] = useState(false);
@@ -63,19 +117,13 @@ export default function MorseDecoder() {
   const fftCanvasRef = useRef(null);
   const waveCanvasRef = useRef(null);
   const rafRef = useRef(null);
+  const detectionIntervalRef = useRef(null);
+  const detFreqDataBufRef = useRef(null);
+  const lastUiSyncRef = useRef(0);
+  const signalLevelRef = useRef(0);
 
   // Morse state
-  const stateRef = useRef({
-    isOn: false,
-    lastEdgeAt: 0,
-    pendingSilenceFromEdge: 0,
-    currentSymbol: "",
-    dotDurations: [],
-    pendingSpace: false,
-    // Debouncer / Schmitt trigger state
-    pendingState: false,
-    pendingSince: 0,
-  });
+  const stateRef = useRef(resetMorseState());
 
   const pitchRef = useRef(pitch);
   const thresholdRef = useRef(threshold);
@@ -124,8 +172,9 @@ export default function MorseDecoder() {
     if (!detectorRef.current) {
       const d = audioCtxRef.current.createAnalyser();
       d.fftSize = 1024;
-      d.smoothingTimeConstant = 0.1;
+      d.smoothingTimeConstant = 0.05;
       detectorRef.current = d;
+      detFreqDataBufRef.current = new Uint8Array(d.frequencyBinCount);
     }
     if (!filterRef.current) {
       const f = audioCtxRef.current.createBiquadFilter();
@@ -161,10 +210,19 @@ export default function MorseDecoder() {
     setDecoded((prev) => (prev.endsWith(" ") || prev === "" ? prev : prev + " "));
   }, []);
 
+  const recordUnitSample = useCallback((st, sampleUnit) => {
+    const unit = unitRef.current;
+    if (!autoUnitRef.current || !isValidUnitSample(sampleUnit, unit)) return;
+    st.dotDurations.push(sampleUnit);
+    if (st.dotDurations.length > 10) st.dotDurations.shift();
+    applyUnitFromSamples(st.dotDurations, setUnitMs, setWpm, unitRef);
+  }, []);
+
   const processEdge = useCallback((newState, now) => {
     const st = stateRef.current;
     const dur = now - st.lastEdgeAt;
     const unit = unitRef.current;
+    const bootstrapping = st.dotDurations.length < 3;
 
     if (st.lastEdgeAt === 0) {
       st.lastEdgeAt = now;
@@ -173,29 +231,11 @@ export default function MorseDecoder() {
     }
 
     if (st.isOn && !newState) {
-      // tone just ended -> classify dot or dash
       const isDot = dur < 2 * unit;
       st.currentSymbol += isDot ? "." : "-";
       setCurrentSymbol(st.currentSymbol);
-      if (autoUnitRef.current) {
-        // Both dots and dashes contribute (dash ≈ 3 units)
-        const sampleUnit = isDot ? dur : dur / 3;
-        // Tight outlier rejection: samples must be within 0.5×–2× of the current unit.
-        // Prevents fused or choppy tones from drifting the unit up to the ceiling.
-        const tooLong = sampleUnit > 2 * unit;
-        const tooShort = sampleUnit < unit / 2;
-        if (!tooLong && !tooShort) {
-          st.dotDurations.push(sampleUnit);
-          if (st.dotDurations.length > 10) st.dotDurations.shift();
-          // Bootstrap: don't apply unit update until ≥2 consistent samples accumulated
-          if (st.dotDurations.length >= 2) {
-            const avg = st.dotDurations.reduce((a, b) => a + b, 0) / st.dotDurations.length;
-            const clamped = Math.max(30, Math.min(300, Math.round(avg)));
-            setUnitMs(clamped);
-            unitRef.current = clamped;
-            setWpm(Math.round(1200 / clamped));
-          }
-        }
+      if (autoUnitRef.current && isDot) {
+        recordUnitSample(st, dur);
       }
     } else if (!st.isOn && newState) {
       // silence just ended -> classify gap
@@ -204,13 +244,17 @@ export default function MorseDecoder() {
         addSpace();
       } else if (dur > 2 * unit) {
         flushSymbol();
+        // Letter gap ≈ 3 units — secondary calibration when dot samples are sparse.
+        if (autoUnitRef.current && bootstrapping && dur < 5 * unit) {
+          recordUnitSample(st, dur / 3);
+        }
       }
       // else intra-symbol gap, ignore
     }
 
     st.isOn = newState;
     st.lastEdgeAt = now;
-  }, [flushSymbol, addSpace]);
+  }, [flushSymbol, addSpace, recordUnitSample]);
 
   const checkTrailingTimeout = useCallback((now) => {
     const st = stateRef.current;
@@ -227,17 +271,87 @@ export default function MorseDecoder() {
     }
   }, [flushSymbol, addSpace]);
 
-  const renderLoop = useCallback(() => {
-    const analyser = analyserRef.current;
+  const syncSignalUi = useCallback((level, rawOn) => {
+    const nowMs = performance.now();
+    if (nowMs - lastUiSyncRef.current < UI_SYNC_MS) return;
+    lastUiSyncRef.current = nowMs;
+    setSignalLevel(level);
+    setSignalOn(rawOn);
+  }, []);
+
+  const readDetectorLevel = useCallback(() => {
     const detector = detectorRef.current;
     const ctx = audioCtxRef.current;
-    if (!analyser || !detector || !ctx) return;
+    const detFreqData = detFreqDataBufRef.current;
+    if (!detector || !ctx || !detFreqData) return 0;
+
+    detector.getByteFrequencyData(detFreqData);
+    const sampleRate = ctx.sampleRate;
+    const targetHz = pitchRef.current;
+    const detBufLen = detFreqData.length;
+    const detBin = Math.round((targetHz / (sampleRate / 2)) * detBufLen);
+    const detHW = Math.max(1, Math.round((40 / (sampleRate / 2)) * detBufLen));
+    let peak = 0;
+    for (let i = Math.max(0, detBin - detHW); i <= Math.min(detBufLen - 1, detBin + detHW); i++) {
+      if (detFreqData[i] > peak) peak = detFreqData[i];
+    }
+    return peak;
+  }, []);
+
+  const runDetectionTick = useCallback(() => {
+    const level = readDetectorLevel();
+    signalLevelRef.current = level;
+
+    if (calibThrSamplesRef.current) {
+      calibThrSamplesRef.current.push(level);
+    }
+
+    const thr = thresholdRef.current;
+    const st = stateRef.current;
+    const HYST = Math.max(4, thr * 0.08);
+    const rawOn = level >= NOISE_FLOOR && (st.isOn
+      ? level > thr - HYST
+      : level > thr + HYST);
+
+    const nowMs = performance.now();
+    if (rawOn !== st.isOn) {
+      if (st.pendingState !== rawOn) {
+        st.pendingState = rawOn;
+        st.pendingSince = nowMs;
+      } else if (nowMs - st.pendingSince >= MIN_EDGE_MS) {
+        processEdge(rawOn, nowMs);
+        st.pendingState = rawOn;
+      }
+    } else {
+      st.pendingState = rawOn;
+      checkTrailingTimeout(nowMs);
+    }
+
+    syncSignalUi(level, rawOn);
+  }, [readDetectorLevel, processEdge, checkTrailingTimeout, syncSignalUi]);
+
+  const startDetectionLoop = useCallback(() => {
+    if (detectionIntervalRef.current) return;
+    lastUiSyncRef.current = 0;
+    runDetectionTick();
+    detectionIntervalRef.current = setInterval(runDetectionTick, DETECTION_INTERVAL_MS);
+  }, [runDetectionTick]);
+
+  const stopDetectionLoop = useCallback(() => {
+    if (detectionIntervalRef.current) {
+      clearInterval(detectionIntervalRef.current);
+      detectionIntervalRef.current = null;
+    }
+  }, []);
+
+  const renderLoop = useCallback(() => {
+    const analyser = analyserRef.current;
+    const ctx = audioCtxRef.current;
+    if (!analyser || !ctx) return;
 
     const bufLen = analyser.frequencyBinCount;
     const freqData = new Uint8Array(bufLen);
     const timeData = new Uint8Array(bufLen);
-    const detBufLen = detector.frequencyBinCount;
-    const detFreqData = new Uint8Array(detBufLen);
 
     const fftCanvas = fftCanvasRef.current;
     const waveCanvas = waveCanvasRef.current;
@@ -246,62 +360,20 @@ export default function MorseDecoder() {
       rafRef.current = requestAnimationFrame(draw);
       analyser.getByteFrequencyData(freqData);
       analyser.getByteTimeDomainData(timeData);
-      detector.getByteFrequencyData(detFreqData);
 
       const sampleRate = ctx.sampleRate;
       const targetHz = pitchRef.current;
       const bin = Math.round((targetHz / (sampleRate / 2)) * bufLen);
-      // Visual highlight band on the broadband display (~80 Hz wide)
       const halfWidth = Math.max(2, Math.round((80 / (sampleRate / 2)) * bufLen / 2));
+      const thr = thresholdRef.current;
 
-      // Detection level: peak of the bandpass-filtered spectrum near targetHz
-      const detBin = Math.round((targetHz / (sampleRate / 2)) * detBufLen);
-      const detHW = Math.max(1, Math.round((40 / (sampleRate / 2)) * detBufLen));
-      let peak = 0;
-      for (let i = Math.max(0, detBin - detHW); i <= Math.min(detBufLen - 1, detBin + detHW); i++) {
-        if (detFreqData[i] > peak) peak = detFreqData[i];
-      }
-      const level = peak;
-      setSignalLevel(level);
-
-      // Calibration samplers
       if (calibPitchSamplesRef.current) {
         const buf = calibPitchSamplesRef.current;
         for (let i = 0; i < bufLen; i++) buf.freqAccum[i] += freqData[i];
         buf.frames += 1;
       }
-      if (calibThrSamplesRef.current) {
-        calibThrSamplesRef.current.push(level);
-      }
 
-      const thr = thresholdRef.current;
-      // Schmitt-trigger hysteresis: widen the on/off thresholds.
-      // Absolute floor — any level below NOISE_FLOOR is treated as silence regardless
-      // of the user-set threshold, to reject bandpass-rejected leakage from off-pitch tones.
-      const st = stateRef.current;
-      const HYST = Math.max(4, thr * 0.08);
-      const NOISE_FLOOR = 25;
-      const rawOn = level >= NOISE_FLOOR && (st.isOn
-        ? level > thr - HYST
-        : level > thr + HYST);
-      setSignalOn(rawOn);
-
-      const nowMs = performance.now();
-      // Debounce: only commit a transition after MIN_EDGE_MS of stable opposite state
-      const MIN_EDGE_MS = 12;
-      if (rawOn !== st.isOn) {
-        if (st.pendingState !== rawOn) {
-          st.pendingState = rawOn;
-          st.pendingSince = nowMs;
-        } else if (nowMs - st.pendingSince >= MIN_EDGE_MS) {
-          processEdge(rawOn, nowMs);
-          st.pendingState = rawOn;
-        }
-      } else {
-        st.pendingState = rawOn;
-        checkTrailingTimeout(nowMs);
-      }
-      const isOn = st.isOn;
+      const isOn = stateRef.current.isOn;
 
       // Draw FFT
       if (fftCanvas) {
@@ -401,7 +473,7 @@ export default function MorseDecoder() {
       }
     };
     draw();
-  }, [processEdge, checkTrailingTimeout]);
+  }, []);
 
   const startMic = useCallback(async () => {
     try {
@@ -418,23 +490,21 @@ export default function MorseDecoder() {
       src.connect(gainRef.current);
       micSourceRef.current = src;
       setRunning(true);
-      stateRef.current = {
-        isOn: false,
-        lastEdgeAt: 0,
-        currentSymbol: "",
-        dotDurations: [],
-        pendingState: false,
-        pendingSince: 0,
-      };
+      stateRef.current = resetMorseState();
+      if (autoUnitRef.current) {
+        resetAutoUnit(setUnitMs, setWpm, unitRef);
+      }
+      startDetectionLoop();
       renderLoop();
       toast.success("Microphone capture started");
     } catch (e) {
       console.error(e);
       toast.error("Microphone access denied or unavailable");
     }
-  }, [ensureAudioCtx, renderLoop]);
+  }, [ensureAudioCtx, renderLoop, startDetectionLoop]);
 
   const stopAll = useCallback(() => {
+    stopDetectionLoop();
     if (rafRef.current) cancelAnimationFrame(rafRef.current);
     rafRef.current = null;
     if (micSourceRef.current) {
@@ -454,7 +524,7 @@ export default function MorseDecoder() {
     setFilePlaying(false);
     setRunning(false);
     setSignalOn(false);
-  }, []);
+  }, [stopDetectionLoop]);
 
   const handleFile = useCallback(async (file) => {
     if (!file) return;
@@ -494,16 +564,13 @@ export default function MorseDecoder() {
     filePlayingRef.current = true;
     setFilePlaying(true);
     setRunning(true);
-    stateRef.current = {
-      isOn: false,
-      lastEdgeAt: 0,
-      currentSymbol: "",
-      dotDurations: [],
-      pendingState: false,
-      pendingSince: 0,
-    };
+    stateRef.current = resetMorseState();
+    if (autoUnitRef.current) {
+      resetAutoUnit(setUnitMs, setWpm, unitRef);
+    }
+    startDetectionLoop();
     renderLoop();
-  }, [ensureAudioCtx, renderLoop]);
+  }, [ensureAudioCtx, renderLoop, startDetectionLoop]);
 
   const onDropFile = useCallback((e) => {
     e.preventDefault();
@@ -532,17 +599,8 @@ export default function MorseDecoder() {
   const clearAll = useCallback(() => {
     setDecoded("");
     setCurrentSymbol("");
-    setUnitMs(80);
-    unitRef.current = 80;
-    setWpm(0);
-    stateRef.current = {
-      isOn: false,
-      lastEdgeAt: 0,
-      currentSymbol: "",
-      dotDurations: [],
-      pendingState: false,
-      pendingSince: 0,
-    };
+    resetAutoUnit(setUnitMs, setWpm, unitRef);
+    stateRef.current = resetMorseState();
   }, []);
 
   // ----- Auto target pitch -----
