@@ -30,6 +30,19 @@ does not call the backend; the backend is a generic `/api` service (see `backend
 - `backend/pytest.ini` pins `-n 2 --dist loadscope` (pytest-xdist). Run serial with `-n 0`
   (NOT `-p no:xdist`). Do not edit `addopts`. There are currently no backend tests.
 
+### Testing the Morse decoder in the cloud VM (non-obvious)
+
+The decoder does audio edge-detection inside `requestAnimationFrame`. The cloud VM's
+software-rendered Chrome runs rAF at a low/irregular frame rate, so it CANNOT resolve the
+bundled `frontend/public/sos.wav` / `sos_long.wav` (unit ≈ 80 ms) — decoding produces garbage
+and the auto-unit calibration mis-converges. This is a headless-rendering limitation, not an
+app bug; on normal hardware at 60 fps those files decode fine. To demonstrate a correct decode
+in the VM, use a slow clip (unit ≥ ~300 ms). Recipe that reliably decodes "SOS": FILE tab →
+load the slow clip → PLAY → click AUTO next to PITCH (locks ~700 Hz) → turn AUTO-UNIT OFF and
+set UNIT to 300 ms → PLAY. Gotcha: the CLEAR button resets UNIT back to 80 ms, so re-set UNIT
+after clearing. Screen recording of the computerUse browser does not reliably sync here; prefer
+screenshots for evidence.
+
 ### Lint / test / build
 
 - Backend lint: `flake8 server.py`, `black --check server.py` (report pre-existing style nits).
