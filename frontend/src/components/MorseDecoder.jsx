@@ -27,12 +27,14 @@ import { decodeMorseSymbol } from "@/lib/morse";
 const FFT_SIZE = 2048;
 const SMOOTHING = 0.8;
 const DETECTION_INTERVAL_MS = 8;
+const TRAILING_INTERVAL_MS = 30;
 const MIN_EDGE_MS = 8;
 const UI_SYNC_MS = 50;
 const NOISE_FLOOR = 25;
 const UNIT_MIN_MS = 30;
 const UNIT_MAX_MS = 300;
 const DEFAULT_UNIT_MS = 80;
+const BANDPASS_Q = 14;
 
 function median(values) {
   if (!values.length) return 0;
@@ -104,9 +106,14 @@ export default function MorseDecoder() {
   // Refs that need not retrigger renders
   const audioCtxRef = useRef(null);
   const analyserRef = useRef(null); // raw broadband analyser (for FFT/wave display)
-  const detectorRef = useRef(null); // post-filter analyser (for tone detection)
+  const detectorRef = useRef(null); // post-filter analyser (FFT fallback detection)
   const filterRef = useRef(null); // BiquadFilterNode (bandpass)
   const gainRef = useRef(null); // GainNode (input level)
+  const workletNodeRef = useRef(null);
+  const workletSilentGainRef = useRef(null);
+  const workletModuleLoadedRef = useRef(false);
+  const useWorkletRef = useRef(false);
+  const sessionTimeRef = useRef({ perfStart: 0, audioStart: 0 });
   const micStreamRef = useRef(null);
   const micSourceRef = useRef(null);
   const fileSourceRef = useRef(null); // AudioBufferSourceNode
@@ -151,7 +158,16 @@ export default function MorseDecoder() {
       } catch (e) { /* ignore */ }
     }
   }, [pitch]);
-  useEffect(() => { thresholdRef.current = threshold; }, [threshold]);
+  useEffect(() => {
+    thresholdRef.current = threshold;
+    if (workletNodeRef.current) {
+      workletNodeRef.current.port.postMessage({
+        type: "config",
+        threshold,
+        noiseFloor: NOISE_FLOOR,
+      });
+    }
+  }, [threshold]);
   useEffect(() => { unitRef.current = unitMs; }, [unitMs]);
   useEffect(() => { autoUnitRef.current = autoUnit; }, [autoUnit]);
 
@@ -180,7 +196,7 @@ export default function MorseDecoder() {
       const f = audioCtxRef.current.createBiquadFilter();
       f.type = "bandpass";
       f.frequency.value = pitchRef.current;
-      f.Q.value = 20;
+      f.Q.value = BANDPASS_Q;
       f.connect(detectorRef.current);
       filterRef.current = f;
     } else {
@@ -195,6 +211,77 @@ export default function MorseDecoder() {
     }
     return audioCtxRef.current;
   }, []);
+
+  const markSessionStart = useCallback(() => {
+    const ctx = audioCtxRef.current;
+    sessionTimeRef.current = {
+      perfStart: performance.now(),
+      audioStart: ctx ? ctx.currentTime : 0,
+    };
+  }, []);
+
+  const audioTimeToPerfMs = useCallback((timeSec) => {
+    const session = sessionTimeRef.current;
+    return session.perfStart + (timeSec - session.audioStart) * 1000;
+  }, []);
+
+  const loadWorkletModule = useCallback(async (ctx) => {
+    if (workletModuleLoadedRef.current) return true;
+    try {
+      const base = process.env.PUBLIC_URL || "";
+      await ctx.audioWorklet.addModule(`${base}/morse-detector-processor.js`);
+      workletModuleLoadedRef.current = true;
+      return true;
+    } catch (e) {
+      console.warn("AudioWorklet unavailable, using interval fallback", e);
+      return false;
+    }
+  }, []);
+
+  const teardownWorkletChain = useCallback(() => {
+    if (workletNodeRef.current) {
+      try { workletNodeRef.current.port.onmessage = null; } catch (e) { /* ignore */ }
+      try { workletNodeRef.current.disconnect(); } catch (e) { /* ignore */ }
+      workletNodeRef.current = null;
+    }
+    if (workletSilentGainRef.current) {
+      try { workletSilentGainRef.current.disconnect(); } catch (e) { /* ignore */ }
+      workletSilentGainRef.current = null;
+    }
+    if (filterRef.current && detectorRef.current) {
+      try {
+        filterRef.current.disconnect();
+        filterRef.current.connect(detectorRef.current);
+      } catch (e) { /* ignore */ }
+    }
+    useWorkletRef.current = false;
+  }, []);
+
+  const ensureWorkletNode = useCallback(async () => {
+    const ctx = await ensureAudioCtx();
+    const loaded = await loadWorkletModule(ctx);
+    useWorkletRef.current = loaded;
+    if (!loaded) return false;
+    if (workletNodeRef.current) return true;
+
+    const node = new AudioWorkletNode(ctx, "morse-detector-processor");
+    node.port.postMessage({
+      type: "config",
+      threshold: thresholdRef.current,
+      noiseFloor: NOISE_FLOOR,
+    });
+
+    const silent = ctx.createGain();
+    silent.gain.value = 0;
+
+    filterRef.current.disconnect();
+    filterRef.current.connect(node);
+    node.connect(silent);
+
+    workletNodeRef.current = node;
+    workletSilentGainRef.current = silent;
+    return true;
+  }, [ensureAudioCtx, loadWorkletModule]);
 
   const flushSymbol = useCallback(() => {
     const st = stateRef.current;
@@ -279,6 +366,22 @@ export default function MorseDecoder() {
     setSignalOn(rawOn);
   }, []);
 
+  const handleWorkletMessage = useCallback((event) => {
+    const msg = event.data;
+    if (!msg?.type) return;
+
+    if (msg.type === "level") {
+      signalLevelRef.current = msg.level;
+      if (calibThrSamplesRef.current) calibThrSamplesRef.current.push(msg.level);
+      syncSignalUi(msg.level, msg.isOn);
+      return;
+    }
+
+    if (msg.type === "edge") {
+      processEdge(msg.on, audioTimeToPerfMs(msg.timeSec));
+    }
+  }, [audioTimeToPerfMs, processEdge, syncSignalUi]);
+
   const readDetectorLevel = useCallback(() => {
     const detector = detectorRef.current;
     const ctx = audioCtxRef.current;
@@ -308,10 +411,11 @@ export default function MorseDecoder() {
 
     const thr = thresholdRef.current;
     const st = stateRef.current;
-    const HYST = Math.max(4, thr * 0.08);
+    const hystOn = Math.max(3, thr * 0.05);
+    const hystOff = Math.max(2, thr * 0.015);
     const rawOn = level >= NOISE_FLOOR && (st.isOn
-      ? level > thr - HYST
-      : level > thr + HYST);
+      ? level > thr - hystOff
+      : level > thr + hystOn);
 
     const nowMs = performance.now();
     if (rawOn !== st.isOn) {
@@ -330,12 +434,23 @@ export default function MorseDecoder() {
     syncSignalUi(level, rawOn);
   }, [readDetectorLevel, processEdge, checkTrailingTimeout, syncSignalUi]);
 
+  const runTrailingTimeoutTick = useCallback(() => {
+    checkTrailingTimeout(performance.now());
+  }, [checkTrailingTimeout]);
+
   const startDetectionLoop = useCallback(() => {
     if (detectionIntervalRef.current) return;
     lastUiSyncRef.current = 0;
+
+    if (useWorkletRef.current && workletNodeRef.current) {
+      workletNodeRef.current.port.onmessage = handleWorkletMessage;
+      detectionIntervalRef.current = setInterval(runTrailingTimeoutTick, TRAILING_INTERVAL_MS);
+      return;
+    }
+
     runDetectionTick();
     detectionIntervalRef.current = setInterval(runDetectionTick, DETECTION_INTERVAL_MS);
-  }, [runDetectionTick]);
+  }, [handleWorkletMessage, runDetectionTick, runTrailingTimeoutTick]);
 
   const stopDetectionLoop = useCallback(() => {
     if (detectionIntervalRef.current) {
@@ -478,6 +593,8 @@ export default function MorseDecoder() {
   const startMic = useCallback(async () => {
     try {
       await ensureAudioCtx();
+      await ensureWorkletNode();
+      markSessionStart();
       const stream = await navigator.mediaDevices.getUserMedia({
         audio: {
           echoCancellation: false,
@@ -501,7 +618,7 @@ export default function MorseDecoder() {
       console.error(e);
       toast.error("Microphone access denied or unavailable");
     }
-  }, [ensureAudioCtx, renderLoop, startDetectionLoop]);
+  }, [ensureAudioCtx, ensureWorkletNode, markSessionStart, renderLoop, startDetectionLoop]);
 
   const stopAll = useCallback(() => {
     stopDetectionLoop();
@@ -547,6 +664,7 @@ export default function MorseDecoder() {
       return;
     }
     await ensureAudioCtx();
+    await ensureWorkletNode();
     if (fileSourceRef.current) {
       try { fileSourceRef.current.stop(); } catch (e) { /* ignore stop errors */ }
       try { fileSourceRef.current.disconnect(); } catch (e) { /* ignore disconnect errors */ }
@@ -559,6 +677,7 @@ export default function MorseDecoder() {
       filePlayingRef.current = false;
       setFilePlaying(false);
     };
+    markSessionStart();
     src.start();
     fileSourceRef.current = src;
     filePlayingRef.current = true;
@@ -570,7 +689,7 @@ export default function MorseDecoder() {
     }
     startDetectionLoop();
     renderLoop();
-  }, [ensureAudioCtx, renderLoop, startDetectionLoop]);
+  }, [ensureAudioCtx, ensureWorkletNode, markSessionStart, renderLoop, startDetectionLoop]);
 
   const onDropFile = useCallback((e) => {
     e.preventDefault();
@@ -722,7 +841,10 @@ export default function MorseDecoder() {
     toast.success(`Saved → ${key}`);
   }, [pitch, threshold]);
 
-  useEffect(() => () => stopAll(), [stopAll]);
+  useEffect(() => () => {
+    stopAll();
+    teardownWorkletChain();
+  }, [stopAll, teardownWorkletChain]);
 
   // Resize canvases to their containers (devicePixelRatio aware)
   useEffect(() => {
