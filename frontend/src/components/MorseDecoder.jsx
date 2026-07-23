@@ -21,6 +21,7 @@ import {
   Save,
   Volume2,
   Bookmark,
+  Timer,
 } from "lucide-react";
 import { decodeMorseSymbol } from "@/lib/morse";
 
@@ -983,20 +984,20 @@ export default function MorseDecoder() {
         </div>
 
         {/* Controls */}
-        <aside className="col-span-1 lg:col-span-4 border border-[#1A3324] bg-[#0A0A0A] p-5 flex flex-col gap-7">
+        <aside className="col-span-1 lg:col-span-4 border border-[#1A3324] bg-[#0A0A0A] p-5 flex flex-col gap-6">
           <Tabs value={source} onValueChange={(v) => { stopAll(); setSource(v); }} className="w-full">
             <TabsList className="w-full grid grid-cols-2 rounded-none bg-[#050505] p-0 h-12 border border-[#1A3324]">
               <TabsTrigger
                 value="mic"
                 data-testid="tab-mic"
-                className="rounded-none data-[state=active]:bg-[#00FF66] data-[state=active]:text-black text-[#80B399] font-[JetBrains_Mono,monospace] tracking-[0.2em] uppercase text-sm"
+                className="rounded-none h-full data-[state=active]:bg-[#00FF66] data-[state=active]:text-black text-[#80B399] font-[JetBrains_Mono,monospace] tracking-[0.2em] uppercase text-sm"
               >
                 <Mic className="h-4 w-4 mr-2" /> Mic
               </TabsTrigger>
               <TabsTrigger
                 value="file"
                 data-testid="tab-file"
-                className="rounded-none data-[state=active]:bg-[#00FF66] data-[state=active]:text-black text-[#80B399] font-[JetBrains_Mono,monospace] tracking-[0.2em] uppercase text-sm"
+                className="rounded-none h-full data-[state=active]:bg-[#00FF66] data-[state=active]:text-black text-[#80B399] font-[JetBrains_Mono,monospace] tracking-[0.2em] uppercase text-sm"
               >
                 <Upload className="h-4 w-4 mr-2" /> File
               </TabsTrigger>
@@ -1089,39 +1090,6 @@ export default function MorseDecoder() {
             />
           </div>
 
-          {/* Presets A/B */}
-          <div>
-            <div className="text-sm tracking-[0.3em] uppercase text-[#80B399] mb-3 flex items-center gap-2">
-              <Bookmark className="h-4 w-4" /> Presets
-            </div>
-            <div className="grid grid-cols-2 gap-3">
-              {[
-                { key: "A", data: presetA },
-                { key: "B", data: presetB },
-              ].map(({ key, data }) => (
-                <div key={key} className={`border ${activePreset === key ? "border-[#00FF66]" : "border-[#1A3324]"} p-3 flex flex-col gap-2`}>
-                  <button
-                    data-testid={`preset-${key.toLowerCase()}-recall-btn`}
-                    onClick={() => recallPreset(key)}
-                    className={`flex items-center justify-between font-[JetBrains_Mono,monospace] tracking-wider px-2 py-2 ${activePreset === key ? "text-black bg-[#00FF66]" : "text-[#00FF66] hover:text-black hover:bg-[#00FF66]"} transition-colors`}
-                  >
-                    <span className="text-2xl font-bold">{key}</span>
-                    <span className="text-xs opacity-80 leading-tight text-right" data-testid={`preset-${key.toLowerCase()}-values`}>
-                      {data.pitch}Hz · {data.threshold}
-                    </span>
-                  </button>
-                  <button
-                    data-testid={`preset-${key.toLowerCase()}-save-btn`}
-                    onClick={() => savePreset(key)}
-                    className="flex items-center justify-center gap-2 text-xs tracking-[0.25em] uppercase text-[#FFB000] border border-[#332300] hover:border-[#FFB000] hover:bg-[#FFB000] hover:text-black transition-colors py-2"
-                  >
-                    <Save className="h-4 w-4" /> Save
-                  </button>
-                </div>
-              ))}
-            </div>
-          </div>
-
           {/* Pitch */}
           <div>
             <div className="flex items-baseline justify-between mb-2">
@@ -1198,40 +1166,76 @@ export default function MorseDecoder() {
             </div>
           </div>
 
-          {/* Unit / WPM */}
-          <div className="grid grid-cols-2 gap-3 pt-1">
-            <div className="border border-[#1A3324] p-3">
-              <div className="text-xs tracking-[0.25em] uppercase text-[#80B399]">WPM</div>
-              <div data-testid="wpm-readout" className="font-[JetBrains_Mono,monospace] text-4xl text-[#FFB000] tracking-wider">
-                {wpm || "—"}
-              </div>
+          {/* Presets + Speed & Timing */}
+          <div className="border border-[#1A3324] p-4 flex flex-col gap-4">
+            <div className="text-sm tracking-[0.3em] uppercase text-[#80B399] flex items-center gap-2">
+              <Bookmark className="h-4 w-4" /> Presets
             </div>
-            <div className="border border-[#1A3324] p-3">
-              <div className="text-xs tracking-[0.25em] uppercase text-[#80B399]">Unit (ms)</div>
-              <div data-testid="unit-readout" className="font-[JetBrains_Mono,monospace] text-4xl text-[#00FF66] tracking-wider">
-                {unitMs}
-              </div>
+            <div className="grid grid-cols-2 gap-3">
+              {[
+                { key: "A", data: presetA },
+                { key: "B", data: presetB },
+              ].map(({ key, data }) => (
+                <div key={key} className={`border ${activePreset === key ? "border-[#00FF66]" : "border-[#1A3324]"} p-3 flex flex-col gap-2`}>
+                  <button
+                    data-testid={`preset-${key.toLowerCase()}-recall-btn`}
+                    onClick={() => recallPreset(key)}
+                    className={`flex items-center justify-between font-[JetBrains_Mono,monospace] tracking-wider px-2 py-2 ${activePreset === key ? "text-black bg-[#00FF66]" : "text-[#00FF66] hover:text-black hover:bg-[#00FF66]"} transition-colors`}
+                  >
+                    <span className="text-2xl font-bold">{key}</span>
+                    <span className="text-xs opacity-80 leading-tight text-right" data-testid={`preset-${key.toLowerCase()}-values`}>
+                      {data.pitch}Hz · {data.threshold}
+                    </span>
+                  </button>
+                  <button
+                    data-testid={`preset-${key.toLowerCase()}-save-btn`}
+                    onClick={() => savePreset(key)}
+                    className="flex items-center justify-center gap-2 text-xs tracking-[0.25em] uppercase text-[#FFB000] border border-[#332300] hover:border-[#FFB000] hover:bg-[#FFB000] hover:text-black transition-colors h-9"
+                  >
+                    <Save className="h-4 w-4" /> Save
+                  </button>
+                </div>
+              ))}
             </div>
-          </div>
 
-          <div className="flex items-center justify-between gap-3 text-xs tracking-[0.25em] uppercase text-[#80B399]">
-            <button
-              data-testid="auto-unit-toggle"
-              onClick={() => setAutoUnit((v) => !v)}
-              className={`px-3 py-2 border ${autoUnit ? "border-[#00FF66] text-[#00FF66]" : "border-[#1A3324] text-[#80B399]"} hover:border-[#00FF66] hover:text-[#00FF66] transition-colors whitespace-nowrap`}
-            >
-              Auto unit: {autoUnit ? "ON" : "OFF"}
-            </button>
-            <Slider
-              data-testid="manual-unit-slider"
-              min={30}
-              max={300}
-              step={5}
-              value={[unitMs]}
-              onValueChange={([v]) => { setUnitMs(v); setWpm(Math.round(1200 / v)); }}
-              disabled={autoUnit}
-              className="flex-1 [&_[role=slider]]:rounded-none [&_[role=slider]]:bg-[#00FF66] [&_[role=slider]]:border-[#00FF66] [&_[role=slider]]:h-4 [&_[role=slider]]:w-3 [&>span:first-child]:bg-[#1A3324] [&>span:first-child>span]:bg-[#00FF66] disabled:opacity-40"
-            />
+            <div className="border-t border-[#1A3324] pt-4 flex flex-col gap-4">
+              <div className="text-xs tracking-[0.3em] uppercase text-[#80B399] flex items-center gap-2">
+                <Timer className="h-3.5 w-3.5" /> Speed &amp; Timing
+              </div>
+              <div className="grid grid-cols-2 gap-3">
+                <div className="border border-[#1A3324] p-3 bg-[#050505]">
+                  <div className="text-xs tracking-[0.25em] uppercase text-[#80B399]">WPM</div>
+                  <div data-testid="wpm-readout" className="font-[JetBrains_Mono,monospace] text-4xl text-[#FFB000] tracking-wider">
+                    {wpm || "—"}
+                  </div>
+                </div>
+                <div className="border border-[#1A3324] p-3 bg-[#050505]">
+                  <div className="text-xs tracking-[0.25em] uppercase text-[#80B399]">Unit (ms)</div>
+                  <div data-testid="unit-readout" className="font-[JetBrains_Mono,monospace] text-4xl text-[#00FF66] tracking-wider">
+                    {unitMs}
+                  </div>
+                </div>
+              </div>
+              <div className="flex items-center justify-between gap-3 text-xs tracking-[0.25em] uppercase text-[#80B399]">
+                <button
+                  data-testid="auto-unit-toggle"
+                  onClick={() => setAutoUnit((v) => !v)}
+                  className={`px-3 py-2 h-9 border ${autoUnit ? "border-[#00FF66] text-[#00FF66]" : "border-[#1A3324] text-[#80B399]"} hover:border-[#00FF66] hover:text-[#00FF66] transition-colors whitespace-nowrap`}
+                >
+                  Auto unit: {autoUnit ? "ON" : "OFF"}
+                </button>
+                <Slider
+                  data-testid="manual-unit-slider"
+                  min={30}
+                  max={300}
+                  step={5}
+                  value={[unitMs]}
+                  onValueChange={([v]) => { setUnitMs(v); setWpm(Math.round(1200 / v)); }}
+                  disabled={autoUnit}
+                  className="flex-1 [&_[role=slider]]:rounded-none [&_[role=slider]]:bg-[#00FF66] [&_[role=slider]]:border-[#00FF66] [&_[role=slider]]:h-4 [&_[role=slider]]:w-3 [&>span:first-child]:bg-[#1A3324] [&>span:first-child>span]:bg-[#00FF66] disabled:opacity-40"
+                />
+              </div>
+            </div>
           </div>
         </aside>
       </div>
