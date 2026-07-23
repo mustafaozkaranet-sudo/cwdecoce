@@ -33,7 +33,10 @@ const NOISE_FLOOR = 25;
 const UNIT_MIN_MS = 30;
 const UNIT_MAX_MS = 300;
 const DEFAULT_UNIT_MS = 80;
-const BANDPASS_Q = 14;
+const BANDPASS_Q = 10;
+const DETECTOR_FFT_SIZE = 512;
+const UNIT_EMA_ALPHA = 0.25;
+const GAP_UNIT_EMA_ALPHA = 0.15;
 
 function median(values) {
   if (!values.length) return 0;
@@ -49,8 +52,24 @@ function samplesConsistent(values, tolerance = 0.4) {
 }
 
 function isValidUnitSample(sampleUnit, unit) {
-  if (sampleUnit < 20) return false;
-  return sampleUnit >= unit / 2 && sampleUnit <= 2 * unit;
+  if (sampleUnit < 20 || sampleUnit > UNIT_MAX_MS) return false;
+  if (sampleUnit > unit * 2.2) return false;
+  return sampleUnit >= unit * 0.45 && sampleUnit <= unit * 1.8;
+}
+
+function isValidGapUnitEstimate(estimatedUnit, unit) {
+  if (estimatedUnit < 20 || estimatedUnit > UNIT_MAX_MS) return false;
+  return estimatedUnit >= unit * 0.5 && estimatedUnit <= unit * 2;
+}
+
+function applyUnitEstimate(measured, setUnitMs, setWpm, unitRef, alpha = UNIT_EMA_ALPHA) {
+  const clamped = Math.max(UNIT_MIN_MS, Math.min(UNIT_MAX_MS, Math.round(measured)));
+  const smoothed = Math.round(unitRef.current * (1 - alpha) + clamped * alpha);
+  const next = Math.max(UNIT_MIN_MS, Math.min(UNIT_MAX_MS, smoothed));
+  if (Math.abs(next - unitRef.current) < 1) return;
+  unitRef.current = next;
+  setUnitMs(next);
+  setWpm(Math.round(1200 / next));
 }
 
 function applyUnitFromSamples(samples, setUnitMs, setWpm, unitRef) {
@@ -58,11 +77,7 @@ function applyUnitFromSamples(samples, setUnitMs, setWpm, unitRef) {
   const med = median(samples);
   const inliers = samples.filter((v) => v >= med * 0.6 && v <= med * 1.4);
   if (inliers.length < 2 || !samplesConsistent(inliers)) return;
-  const clamped = Math.max(UNIT_MIN_MS, Math.min(UNIT_MAX_MS, Math.round(median(inliers))));
-  if (Math.abs(clamped - unitRef.current) < 2) return;
-  setUnitMs(clamped);
-  unitRef.current = clamped;
-  setWpm(Math.round(1200 / clamped));
+  applyUnitEstimate(median(inliers), setUnitMs, setWpm, unitRef, UNIT_EMA_ALPHA);
 }
 
 function resetMorseState() {
@@ -71,6 +86,7 @@ function resetMorseState() {
     lastEdgeAt: 0,
     currentSymbol: "",
     dotDurations: [],
+    gapUnits: [],
     pendingState: false,
     pendingSince: 0,
   };
@@ -186,7 +202,7 @@ export default function MorseDecoder() {
     }
     if (!detectorRef.current) {
       const d = audioCtxRef.current.createAnalyser();
-      d.fftSize = 1024;
+      d.fftSize = DETECTOR_FFT_SIZE;
       d.smoothingTimeConstant = 0;
       detectorRef.current = d;
       detFreqDataBufRef.current = new Uint8Array(d.frequencyBinCount);
@@ -268,6 +284,7 @@ export default function MorseDecoder() {
     reconnectDetectorChain();
     filterRef.current.connect(node);
     node.connect(silent);
+    silent.connect(ctx.destination);
 
     workletNodeRef.current = node;
     workletSilentGainRef.current = silent;
@@ -315,11 +332,20 @@ export default function MorseDecoder() {
     applyUnitFromSamples(st.dotDurations, setUnitMs, setWpm, unitRef);
   }, []);
 
+  const recordGapUnitEstimate = useCallback((st, estimatedUnit) => {
+    const unit = unitRef.current;
+    if (!autoUnitRef.current || !isValidGapUnitEstimate(estimatedUnit, unit)) return;
+    st.gapUnits.push(estimatedUnit);
+    if (st.gapUnits.length > 6) st.gapUnits.shift();
+    if (st.gapUnits.length >= 2 && samplesConsistent(st.gapUnits, 0.35)) {
+      applyUnitEstimate(median(st.gapUnits), setUnitMs, setWpm, unitRef, GAP_UNIT_EMA_ALPHA);
+    }
+  }, []);
+
   const processEdge = useCallback((newState, now) => {
     const st = stateRef.current;
     const dur = now - st.lastEdgeAt;
     const unit = unitRef.current;
-    const bootstrapping = st.dotDurations.length < 3;
 
     if (st.lastEdgeAt === 0) {
       st.lastEdgeAt = now;
@@ -335,23 +361,23 @@ export default function MorseDecoder() {
         recordUnitSample(st, dur);
       }
     } else if (!st.isOn && newState) {
-      // silence just ended -> classify gap
       if (dur > 5 * unit) {
         flushSymbol();
         addSpace();
+        if (autoUnitRef.current) {
+          recordGapUnitEstimate(st, dur / 7);
+        }
       } else if (dur > 2 * unit) {
         flushSymbol();
-        // Letter gap ≈ 3 units — secondary calibration when dot samples are sparse.
-        if (autoUnitRef.current && bootstrapping && dur < 5 * unit) {
-          recordUnitSample(st, dur / 3);
+        if (autoUnitRef.current) {
+          recordGapUnitEstimate(st, dur / 3);
         }
       }
-      // else intra-symbol gap, ignore
     }
 
     st.isOn = newState;
     st.lastEdgeAt = now;
-  }, [flushSymbol, addSpace, recordUnitSample]);
+  }, [flushSymbol, addSpace, recordUnitSample, recordGapUnitEstimate]);
 
   const checkTrailingTimeout = useCallback((now) => {
     const st = stateRef.current;
@@ -404,14 +430,26 @@ export default function MorseDecoder() {
     return peak;
   }, []);
 
+  const edgeSecToSessionMs = useCallback((timeSec) => {
+    const session = sessionTimeRef.current;
+    return session.perfStart + (timeSec - session.audioStart) * 1000;
+  }, []);
+
   const handleWorkletMessage = useCallback((event) => {
     const msg = event.data;
-    if (!msg?.type) return;
-    // Worklet scale sync only — decode edges come from FFT (same scale as threshold UI).
-    if (msg.type === "level" && calibThrSamplesRef.current) {
-      calibThrSamplesRef.current.push(msg.level);
+    if (!msg?.type || !runningRef.current) return;
+
+    if (msg.type === "edge") {
+      processEdge(msg.on, edgeSecToSessionMs(msg.timeSec));
+      return;
     }
-  }, []);
+
+    if (msg.type === "level") {
+      if (calibThrSamplesRef.current) {
+        calibThrSamplesRef.current.push(msg.level);
+      }
+    }
+  }, [edgeSecToSessionMs, processEdge]);
 
   const runDetectionTick = useCallback(() => {
     const level = readDetectorLevel();
@@ -425,29 +463,36 @@ export default function MorseDecoder() {
       workletNodeRef.current.port.postMessage({ type: "calibrate", fftLevel: level });
     }
 
-    const thr = thresholdRef.current;
-    const st = stateRef.current;
-    const hystOn = Math.max(3, thr * 0.05);
-    const hystOff = Math.max(2, thr * 0.015);
-    const rawOn = level >= NOISE_FLOOR && (st.isOn
-      ? level > thr - hystOff
-      : level > thr + hystOn);
-
     const nowMs = getSessionNowMs();
-    if (rawOn !== st.isOn) {
-      if (st.pendingState !== rawOn) {
-        st.pendingState = rawOn;
-        st.pendingSince = nowMs;
-      } else if (nowMs - st.pendingSince >= MIN_EDGE_MS) {
-        processEdge(rawOn, nowMs);
+    const st = stateRef.current;
+
+    if (!useWorkletRef.current) {
+      const thr = thresholdRef.current;
+      const hyst = Math.max(3, thr * 0.03);
+      const rawOn = level >= NOISE_FLOOR && (st.isOn
+        ? level > thr - hyst
+        : level > thr + hyst);
+
+      if (rawOn !== st.isOn) {
+        if (st.pendingState !== rawOn) {
+          st.pendingState = rawOn;
+          st.pendingSince = nowMs;
+        } else if (nowMs - st.pendingSince >= MIN_EDGE_MS) {
+          processEdge(rawOn, st.pendingSince);
+          st.pendingState = rawOn;
+        }
+      } else {
         st.pendingState = rawOn;
       }
-    } else {
-      st.pendingState = rawOn;
-      checkTrailingTimeout(nowMs);
     }
 
-    syncSignalUi(level, rawOn);
+    checkTrailingTimeout(nowMs);
+
+    const thr = thresholdRef.current;
+    const uiOn = level >= NOISE_FLOOR && (st.isOn
+      ? level > thr - Math.max(3, thr * 0.03)
+      : level > thr + Math.max(3, thr * 0.03));
+    syncSignalUi(level, uiOn);
   }, [readDetectorLevel, processEdge, checkTrailingTimeout, syncSignalUi, getSessionNowMs]);
 
   const startDetectionLoop = useCallback(() => {

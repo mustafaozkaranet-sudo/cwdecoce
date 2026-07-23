@@ -55,12 +55,11 @@ class MorseDetectorProcessor extends AudioWorkletProcessor {
       this.lastLevel = level;
 
       const thr = this.threshold;
-      const hystOn = Math.max(3, thr * 0.05);
-      const hystOff = Math.max(2, thr * 0.015);
+      const hyst = Math.max(3, thr * 0.03);
 
       const rawOn = level >= this.noiseFloor && (this.isOn
-        ? level > thr - hystOff
-        : level > thr + hystOn);
+        ? level > thr - hyst
+        : level > thr + hyst);
 
       if (rawOn !== this.isOn) {
         if (this.pendingState !== rawOn) {
